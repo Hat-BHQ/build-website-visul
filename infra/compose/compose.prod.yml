@@ -1,0 +1,26 @@
+services:
+  edge-gateway:
+    ports:
+      - "80:80"
+  portal-web:
+    image: ghcr.io/hat-bhq/hq-portal-web:${IMAGE_TAG:-latest}
+    build: null
+  portal-bff:
+    image: ghcr.io/hat-bhq/hq-portal-bff:${IMAGE_TAG:-latest}
+    build: null
+  identity-service:
+    image: ghcr.io/hat-bhq/hq-identity-service:${IMAGE_TAG:-latest}
+    build: null
+  hqa-service:
+    image: ghcr.io/hat-bhq/hq-hqa-service:${IMAGE_TAG:-latest}
+    build: null
+  sync-api:
+    image: ghcr.io/hat-bhq/hq-sync-service:${IMAGE_TAG:-latest}
+    build: null
+  sync-worker:
+    image: ghcr.io/hat-bhq/hq-sync-service:${IMAGE_TAG:-latest}
+    build: null
+
+  hqs-service:
+    image: ghcr.io/hat-bhq/hq-hqs-service:${IMAGE_TAG:-latest}
+    build: null

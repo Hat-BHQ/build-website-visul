@@ -1,0 +1,10 @@
+{
+  "name": "hq-portal-web",
+  "private": true,
+  "version": "2.0.0",
+  "scripts": {
+    "lint": "node --check assets/app.js",
+    "build": "node --check assets/app.js",
+    "test": "node --check assets/app.js"
+  }
+}

@@ -1,0 +1,48 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - apps/portal-bff
+          - services/identity-service
+          - services/hqa-service
+          - services/hqs-service
+          - services/sync-service
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - run: python -m compileall app
+      - run: pytest -q
+        if: ${{ hashFiles(format('{0}/tests/**', matrix.service)) != '' }}
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/portal-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm install
+      - run: npm run lint
+      - run: npm run build
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose -f infra/compose/compose.yml config >/dev/null

@@ -1,0 +1,38 @@
+name: Deploy production
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag, for example sha-abc123
+        required: true
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload deployment files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "infra/compose/compose.yml,infra/compose/compose.prod.yml,infra/gateway/nginx.conf,infra/postgres/init/01-create-databases.sh,scripts/deployment/*"
+          target: "/opt/hq-platform"
+      - name: Deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -eu
+            cd /opt/hq-platform
+            export IMAGE_TAG='${{ inputs.image_tag }}'
+            docker login ghcr.io -u '${{ github.actor }}' -p '${{ secrets.GHCR_TOKEN }}'
+            bash scripts/deployment/backup.sh
+            docker compose -f infra/compose/compose.yml -f infra/compose/compose.prod.yml pull
+            docker compose -f infra/compose/compose.yml -f infra/compose/compose.prod.yml up -d
+            bash scripts/deployment/health-check.sh
