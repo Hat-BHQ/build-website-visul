@@ -19,7 +19,7 @@ jobs:
       run:
         working-directory: ${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -r requirements.txt
@@ -33,7 +33,7 @@ jobs:
       run:
         working-directory: apps/portal-web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
       - run: npm install
@@ -43,6 +43,6 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - run: docker compose -f infra/compose/compose.yml config >/dev/null
