@@ -1,55 +1,35 @@
-from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from sqlalchemy import func, or_
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.database import Base, SessionLocal, engine, get_db
-from app.models import Listing, ListingSnapshot
-from app.schemas import BulkListingIn
+from app.database import get_db
+from app.keyword_catalog import load_keyword_catalog
+from app.report_config import REPORT_GROUPS_BY_KEY, get_keyword_metadata
 from app.security import require_permission
-from app.service import upsert_listing
+from app.service import (
+    fetch_dashboard_counts,
+    fetch_listing_by_id,
+    fetch_listings,
+    fetch_marketplace_report_listings,
+    fetch_marketplace_report_summary,
+)
 
 
-def serialize(item: Listing) -> dict:
-    return {column.name: getattr(item, column.name) for column in item.__table__.columns}
+app = FastAPI(title="HQA Service", version="2.0.0")
 
 
-def seed():
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
+def _today_hcm():
+    return datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date()
+
+
+@app.on_event("startup")
+def startup_validate_keyword_catalog():
     try:
-        if db.query(Listing).count() == 0:
-            samples = BulkListingIn(listings=[
-                {
-                    "marketplace": "ebay", "external_listing_id": "EBAY-DEMO-001",
-                    "listing_title": "Vintage stereo receiver demo", "seller_name": "Demo Seller",
-                    "current_price": 899.0, "shipping_price": 45.0, "total_price": 944.0,
-                    "currency": "USD", "quantity": 1, "listing_views": 42,
-                    "listing_status": "active", "category_name": "Vintage Stereo Receivers",
-                },
-                {
-                    "marketplace": "reverb", "external_listing_id": "REVERB-DEMO-001",
-                    "listing_title": "Tube amplifier demo", "shop_name": "Demo Audio Shop",
-                    "current_price": 1200.0, "shipping_price": 0.0, "total_price": 1200.0,
-                    "currency": "USD", "quantity": 2, "listing_status": "active",
-                    "category_name": "Amplifiers & Preamps",
-                },
-            ])
-            for item in samples.listings:
-                upsert_listing(db, item)
-            db.commit()
-    finally:
-        db.close()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    seed()
-    yield
-
-
-app = FastAPI(title="HQA Service", version="2.0.0", lifespan=lifespan)
+        load_keyword_catalog()
+    except RuntimeError as exc:
+        raise RuntimeError(f"HQA keyword catalog initialization failed: {exc}") from exc
 
 
 @app.get("/health/live")
@@ -59,7 +39,7 @@ def live():
 
 @app.get("/health/ready")
 def ready(db: Session = Depends(get_db)):
-    db.query(Listing).limit(1).all()
+    db.execute(text("SELECT 1"))
     return {"status": "ready", "database": "ok"}
 
 
@@ -68,10 +48,7 @@ def dashboard(
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.dashboard.view")),
 ):
-    by_marketplace = dict(db.query(Listing.marketplace, func.count(Listing.id)).group_by(Listing.marketplace).all())
-    active = db.query(func.count(Listing.id)).filter(Listing.listing_status == "active").scalar() or 0
-    ended = db.query(func.count(Listing.id)).filter(Listing.listing_status != "active").scalar() or 0
-    return {"active_listings": active, "inactive_listings": ended, "by_marketplace": by_marketplace}
+    return fetch_dashboard_counts(db)
 
 
 @app.get("/internal/v1/listings")
@@ -84,18 +61,21 @@ def listings(
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.listings.view")),
 ):
-    query = db.query(Listing)
-    if marketplace:
-        query = query.filter(Listing.marketplace == marketplace.lower())
-    if status:
-        query = query.filter(Listing.listing_status == status)
-    if q:
-        pattern = f"%{q.strip()}%"
-        query = query.filter(or_(Listing.listing_title.ilike(pattern), Listing.external_listing_id.ilike(pattern)))
-    total = query.count()
-    rows = query.order_by(Listing.last_seen_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-    return {"items": [serialize(row) for row in rows], "page": page, "page_size": page_size,
-            "total": total, "pages": max(1, (total + page_size - 1) // page_size)}
+    items, total = fetch_listings(
+        db,
+        page=page,
+        page_size=page_size,
+        marketplace=marketplace,
+        status=status,
+        q=q,
+    )
+    return {
+        "items": [dict(item) for item in items],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    }
 
 
 @app.get("/internal/v1/listings/{listing_id}")
@@ -104,27 +84,110 @@ def listing_detail(
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.listings.view")),
 ):
-    item = db.query(Listing).filter(Listing.id == listing_id).first()
+    item = fetch_listing_by_id(db, listing_id)
     if not item:
         raise HTTPException(status_code=404, detail="Listing not found")
-    snapshots = db.query(ListingSnapshot).filter(ListingSnapshot.listing_id == listing_id).order_by(
-        ListingSnapshot.captured_at.desc()).limit(100).all()
-    return {"listing": serialize(item), "snapshots": [
-        {column.name: getattr(s, column.name) for column in s.__table__.columns} for s in snapshots
-    ]}
+    return {"listing": dict(item), "snapshots": []}
+
+
+@app.get("/internal/v1/reports/marketplace/summary")
+@app.get("/reports/marketplace/summary")
+def marketplace_report_summary(
+    report_date: date | None = Query(default=None),
+    marketplace: str | None = None,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    selected_date = report_date or _today_hcm()
+    payload = fetch_marketplace_report_summary(
+        db,
+        report_date=selected_date,
+        marketplace=marketplace,
+        q=q,
+    )
+    payload["keyword_catalog"] = get_keyword_metadata()
+    return payload
+
+
+@app.get("/internal/v1/reports/marketplace/listings")
+@app.get("/reports/marketplace/listings")
+def marketplace_report_listings(
+    report_key: str,
+    report_date: date | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+    q: str | None = None,
+    marketplace: str | None = None,
+    category_name: str | None = None,
+    seller: str | None = None,
+    condition: str | None = None,
+    price_min: float | None = Query(default=None, ge=0),
+    price_max: float | None = Query(default=None, ge=0),
+    sort: str = Query(default="price_desc"),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.listings.view")),
+):
+    if report_key not in REPORT_GROUPS_BY_KEY:
+        raise HTTPException(status_code=400, detail="Invalid report_key")
+
+    selected_report_date = report_date
+    selected_date_from = date_from
+    selected_date_to = date_to
+    try:
+        items, total = fetch_marketplace_report_listings(
+            db,
+            report_key=report_key,
+            report_date=selected_report_date,
+            date_from=selected_date_from,
+            date_to=selected_date_to,
+            page=page,
+            page_size=page_size,
+            q=q,
+            marketplace=marketplace,
+            category_name=category_name,
+            seller=seller,
+            condition=condition,
+            price_min=price_min,
+            price_max=price_max,
+            sort=sort,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    applied_filters = {
+        "q": q,
+        "marketplace": marketplace,
+        "category_name": category_name,
+        "seller": seller,
+        "condition": condition,
+        "price_min": price_min,
+        "price_max": price_max,
+        "date_from": selected_date_from.isoformat() if selected_date_from else None,
+        "date_to": selected_date_to.isoformat() if selected_date_to else None,
+        "sort": sort,
+    }
+    return {
+        "report_key": report_key,
+        "report_date": selected_report_date.isoformat() if selected_report_date else None,
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if total else 0,
+        "applied_filters": applied_filters,
+    }
 
 
 @app.post("/internal/v1/listings/bulk-upsert")
 def bulk_upsert(
-    payload: BulkListingIn,
+    payload: dict,
     x_service_token: str | None = Header(None),
     db: Session = Depends(get_db),
 ):
-    if x_service_token != settings.service_token:
-        raise HTTPException(status_code=403, detail="Invalid service token")
-    created = 0
-    for item in payload.listings:
-        _, was_created = upsert_listing(db, item)
-        created += int(was_created)
-    db.commit()
-    return {"processed": len(payload.listings), "created": created, "updated": len(payload.listings) - created}
+    raise HTTPException(
+        status_code=501,
+        detail="Real HQA sync is not implemented yet. Demo data generation is disabled.",
+    )

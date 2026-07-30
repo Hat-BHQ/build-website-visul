@@ -118,6 +118,16 @@ async def hqa_listing_detail(listing_id: str, request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/listings/{listing_id}", request)
 
 
+@app.get("/api/v1/hqa/reports/marketplace/summary")
+async def hqa_marketplace_report_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/summary", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/listings")
+async def hqa_marketplace_report_listings(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/listings", request)
+
+
 @app.post("/api/v1/sync/jobs", status_code=202)
 async def create_sync_job(request: Request):
     return await relay("POST", f"{settings.sync_service_url}/internal/v1/jobs", request, await request.json())

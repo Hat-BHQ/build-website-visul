@@ -39,23 +39,10 @@ def create_job(
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.sync.run")),
 ):
-    existing = db.query(SyncJob).filter(SyncJob.idempotency_key == payload.idempotency_key).first()
-    if existing:
-        return serialize(existing)
-    unique_ids = list(dict.fromkeys(payload.item_ids))
-    job = SyncJob(
-        idempotency_key=payload.idempotency_key,
-        marketplace=payload.marketplace,
-        sync_type=payload.sync_type,
-        requested_by=claims["sub"],
-        total_items=len(unique_ids) if unique_ids else 5,
-        item_ids_json=json.dumps(unique_ids),
+    raise HTTPException(
+        status_code=501,
+        detail="Real sync is not implemented yet. Demo data generation is disabled.",
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    process_sync_job.delay(job.id)
-    return serialize(job)
 
 
 @app.get("/internal/v1/jobs")

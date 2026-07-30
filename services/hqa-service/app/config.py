@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     service_token: str
+    demo_data_enabled: bool = False
     model_config = SettingsConfigDict(case_sensitive=False)
 
 

@@ -19,7 +19,9 @@ def process_sync_job(self, job_id: str):
         job.started_at = datetime.utcnow()
         db.commit()
 
-        identifiers = json.loads(job.item_ids_json or "[]") or [f"{job.marketplace.upper()}-DEMO-{n:03d}" for n in range(1, 6)]
+        identifiers = json.loads(job.item_ids_json or "[]")
+        if not identifiers:
+            raise ValueError("Real sync is not implemented yet. Demo data generation is disabled.")
         processed = 0
         for chunk in build_chunks(identifiers, size=100):
             payload = {"listings": []}
@@ -28,8 +30,6 @@ def process_sync_job(self, job_id: str):
                     "marketplace": job.marketplace,
                     "external_listing_id": external_id,
                     "listing_title": f"{job.marketplace.title()} synchronized listing {external_id}",
-                    "seller_name": "Synchronized Seller" if job.marketplace == "ebay" else None,
-                    "shop_name": "Synchronized Shop" if job.marketplace != "ebay" else None,
                     "current_price": float(500 + index * 25),
                     "shipping_price": 20.0,
                     "total_price": float(520 + index * 25),

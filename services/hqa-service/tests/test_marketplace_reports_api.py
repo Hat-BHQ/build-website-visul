@@ -1,0 +1,349 @@
+import datetime as dt
+import socket
+from sqlalchemy import event
+from app.keyword_catalog import KeywordEntry, normalize_match_text
+from app.models import marketplace_research_results
+from app.report_config import REPORT_GROUPS_BY_KEY, ReportGroup
+
+
+REPORT_DATE = dt.date(2026, 7, 30)
+
+
+def _get_ids(payload):
+    return [item["listing_id"] for item in payload["items"]]
+
+
+def _insert_listing(db_session, row_id: str, listing_id: str, listing_title: str):
+    db_session.execute(
+        marketplace_research_results.insert(),
+        {
+            "id": row_id,
+            "research_date": REPORT_DATE,
+            "collected_at": dt.datetime(2026, 7, 30, 10, 0, 0),
+            "marketplace": "ebay",
+            "listing_id": listing_id,
+            "listing_title": listing_title,
+            "listing_url": f"https://example.test/{listing_id}",
+            "image_url": None,
+            "seller_or_shop": "Pioneer Store",
+            "price": 1200,
+            "currency": "USD",
+            "condition": "used",
+            "category": "speaker",
+            "category_name": "Vintage Speakers",
+            "listing_status": "active",
+            "listing_location": "US",
+            "listing_views": 10,
+            "quantity": 1,
+            "count": None,
+            "updated_at": dt.datetime(2026, 7, 30, 12, 0, 0),
+            "shipping_price": None,
+            "total_price": None,
+            "exclude_flag": False,
+        },
+    )
+    db_session.commit()
+
+
+def _patch_main_group(monkeypatch, entries: list[KeywordEntry]):
+    from app import report_config
+
+    current = report_config.REPORT_GROUPS_BY_KEY["main_repeated"]
+    updated = ReportGroup(
+        key=current.key,
+        title=current.title,
+        table_number=current.table_number,
+        category_names=current.category_names,
+        keyword_categories=current.keyword_categories,
+        title_keywords=[entry.keyword for entry in entries],
+        keyword_filter_enabled=True,
+        keyword_entries=entries,
+        usable_keyword_entries=len(entries),
+        skipped_broad_entries=current.skipped_broad_entries,
+    )
+    monkeypatch.setitem(report_config.REPORT_GROUPS_BY_KEY, "main_repeated", updated)
+
+
+def _pioneer_entry() -> KeywordEntry:
+    return KeywordEntry(
+        product_id="X001",
+        brand="Pioneer",
+        model="SX1080",
+        category="receiver",
+        keyword="Pioneer SX-1080 receiver",
+        normalized_brand=normalize_match_text("Pioneer"),
+        normalized_model=normalize_match_text("SX1080"),
+        normalized_keyword=normalize_match_text("Pioneer SX-1080 receiver"),
+        match_strategy="brand_model",
+        broad_only=False,
+        usable=True,
+    )
+
+
+def _kef_entry() -> KeywordEntry:
+    return KeywordEntry(
+        product_id="X002",
+        brand="KEF",
+        model="104/2",
+        category="speakers",
+        keyword="KEF 104/2 speakers",
+        normalized_brand=normalize_match_text("KEF"),
+        normalized_model=normalize_match_text("104/2"),
+        normalized_keyword=normalize_match_text("KEF 104/2 speakers"),
+        match_strategy="brand_model",
+        broad_only=False,
+        usable=True,
+    )
+
+
+def test_groups_1_6_use_exact_report_date(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    ids = _get_ids(response.json())
+    assert ids == ["G1-OK"]
+    assert "NO-MATCH-TITLE" not in ids
+
+
+def test_groups_1_6_exclude_price_500(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "G1-500" not in _get_ids(response.json())
+
+
+def test_groups_1_6_only_price_gt_500(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=amplifier_receiver&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G2-OK"]
+
+
+def test_blocked_condition_case_insensitive(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "COND-BLOCK" not in _get_ids(response.json())
+
+
+def test_allowed_original_categories_only(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "CAT-BLOCK" not in _get_ids(response.json())
+
+
+def test_category_name_matches_group_with_trailing_dot_normalization(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=speaker_parts&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G3-OK"]
+
+
+def test_groups_1_6_exclude_ended_and_out_of_stock(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    ids = _get_ids(response.json())
+    assert "ENDED-TODAY" not in ids
+    assert "OOS-TODAY" not in ids
+
+
+def test_ended_report_only_ended(client):
+    response = client.get("/internal/v1/reports/marketplace/listings?report_key=ended")
+    assert response.status_code == 200
+    assert set(_get_ids(response.json())) == {"ENDED-TODAY", "ENDED-OLD", "ENDED-NULL-PRICE"}
+
+
+def test_out_of_stock_report_only_out_of_stock(client):
+    response = client.get("/internal/v1/reports/marketplace/listings?report_key=out_of_stock")
+    assert response.status_code == 200
+    assert set(_get_ids(response.json())) == {"OOS-TODAY", "OOS-OLD"}
+
+
+def test_ended_and_out_of_stock_do_not_apply_price_gt_500(client):
+    ended = client.get("/internal/v1/reports/marketplace/listings?report_key=ended")
+    out_stock = client.get("/internal/v1/reports/marketplace/listings?report_key=out_of_stock")
+    assert ended.status_code == 200 and out_stock.status_code == 200
+    assert "ENDED-TODAY" in _get_ids(ended.json())
+    assert "OOS-TODAY" in _get_ids(out_stock.json())
+
+
+def test_sort_price_desc_then_id_desc(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=non_audio_irrelevant&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G6-OK"]
+
+
+def test_search_title(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/listings?report_key=speaker_parts&report_date={REPORT_DATE.isoformat()}&q=horn"
+    )
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G3-OK"]
+
+
+def test_search_listing_id(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/listings?report_key=other_home_audio&report_date={REPORT_DATE.isoformat()}&q=G4-OK"
+    )
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G4-OK"]
+
+
+def test_marketplace_filter(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}&marketplace=EBAY"
+    )
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G1-OK"]
+
+
+def test_pagination(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=ended&page=1&page_size=2")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["total_pages"] == 2
+    assert len(payload["items"]) == 2
+
+
+def test_summary_counts(client):
+    response = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_new_today"] == 6
+    assert payload["total_ended"] == 3
+    assert payload["total_out_of_stock"] == 2
+    assert payload["total_matched"] == 11
+
+
+def test_null_price_does_not_crash_api(client):
+    response = client.get("/internal/v1/reports/marketplace/listings?report_key=ended&q=null")
+    assert response.status_code == 200
+
+
+def test_no_sql_injection(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}&q=' OR 1=1 --"
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+
+
+def test_exclude_keywords_applied_to_groups_1_6(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "EXCLUDE-TITLE" not in _get_ids(response.json())
+
+
+def test_summary_contains_keyword_catalog_metadata(client):
+    response = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["keyword_catalog"]["source"] == "hqa_keywords.csv"
+    assert payload["keyword_catalog"]["raw_rows_count"] == 179
+    assert payload["keyword_catalog"]["total_keywords"] >= 1
+    assert payload["keyword_catalog"]["usable_keyword_entries"] >= 1
+    assert "groups" in payload["keyword_catalog"]
+
+
+def test_no_database_write(client, db_session):
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().lower())
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=ended")
+        assert response.status_code == 200
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    forbidden = ("insert ", "update ", "delete ", "create ", "alter ", "drop ")
+    assert all(not any(statement.startswith(keyword) for keyword in forbidden) for statement in statements)
+
+
+def test_request_does_not_call_network(client, monkeypatch):
+    def blocked_connect(*args, **kwargs):
+        raise AssertionError("Network call should not happen during report request")
+
+    monkeypatch.setattr(socket, "create_connection", blocked_connect)
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=ended")
+    assert response.status_code == 200
+
+
+def test_pioneer_sx1080_hyphen_match(client, db_session, monkeypatch):
+    _insert_listing(db_session, "200", "PIONEER-HYPHEN", "Pioneer SX-1080 Stereo Receiver")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "PIONEER-HYPHEN" in _get_ids(response.json())
+
+
+def test_pioneer_sx1080_no_hyphen_match(client, db_session, monkeypatch):
+    _insert_listing(db_session, "201", "PIONEER-NO-HYPHEN", "Pioneer SX1080 Receiver")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "PIONEER-NO-HYPHEN" in _get_ids(response.json())
+
+
+def test_pioneer_sx1080_with_space_match(client, db_session, monkeypatch):
+    _insert_listing(db_session, "202", "PIONEER-WITH-SPACE", "Pioneer SX 1080 Receiver")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "PIONEER-WITH-SPACE" in _get_ids(response.json())
+
+
+def test_matching_case_insensitive(client, db_session, monkeypatch):
+    _insert_listing(db_session, "203", "PIONEER-UPPER", "PIONEER sX 1080 RECEIVER")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "PIONEER-UPPER" in _get_ids(response.json())
+
+
+def test_slash_model_match(client, db_session, monkeypatch):
+    _insert_listing(db_session, "204", "KEF-1042", "KEF 1042 bookshelf speakers")
+    _patch_main_group(monkeypatch, [_kef_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "KEF-1042" in _get_ids(response.json())
+
+
+def test_brand_and_model_both_required_when_entry_has_both(client, db_session, monkeypatch):
+    _insert_listing(db_session, "205", "ONLY-MODEL", "SX1080 receiver no brand")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "ONLY-MODEL" not in _get_ids(response.json())
+
+
+def test_brand_only_wrong_model_not_match(client, db_session, monkeypatch):
+    _insert_listing(db_session, "206", "WRONG-MODEL", "Pioneer SX980 receiver")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert "WRONG-MODEL" not in _get_ids(response.json())
+
+
+def test_single_token_brand_not_used_as_independent_filter(client):
+    response = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["keyword_catalog"]["skipped_broad_entries"] >= 1
+
+
+def test_count_query_matches_item_query(client):
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}&page_size=100")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == len(payload["items"])
+
+
+def test_table_1_not_zero_when_hyphen_format_differs(client, db_session, monkeypatch):
+    _insert_listing(db_session, "207", "T1-HYPHEN-DIFF", "Vintage Receiver Pioneer SX 1080 Tested")
+    _patch_main_group(monkeypatch, [_pioneer_entry()])
+    response = client.get(f"/internal/v1/reports/marketplace/listings?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert payload_total_non_zero(response.json())
+
+
+def payload_total_non_zero(payload):
+    return payload["total"] > 0
