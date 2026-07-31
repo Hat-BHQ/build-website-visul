@@ -4,23 +4,27 @@ const state = {
   modules: [],
   currentModule: 'HQA',
   hqa: {
-    activeReport: 'all_reports',
+    activeReport: 'all_listings',
     page: 1,
     pageSize: 30,
     summary: null,
     loadingSummary: false,
     loadingListings: false,
     error: '',
+    rawListings: null,
     listingsByReport: {},
     filters: {
       report_date: getHcmDateString(),
       q: '',
       marketplace: '',
+      category: '',
       category_name: '',
       seller: '',
       condition: '',
+      listing_status: '',
       price_min: '',
       price_max: '',
+      sort: 'collected_at_desc',
     },
   },
 };
@@ -36,7 +40,15 @@ const HQA_REPORTS = [
   { key: 'out_of_stock', tableNumber: 8, label: 'Out of Stock' },
 ];
 
-const HQA_REPORT_OPTIONS = [{ key: 'all_reports', label: 'All reports' }, ...HQA_REPORTS.map((item) => ({ key: item.key, label: `Table ${item.tableNumber}` }))];
+const HQA_REPORT_OPTIONS = [
+  { key: 'all_listings', label: 'All listings' },
+  ...HQA_REPORTS.map((item) => ({
+    key: item.key,
+    label: item.key === 'ended' || item.key === 'out_of_stock'
+      ? `Table ${item.tableNumber} - ${item.label}`
+      : `Table ${item.tableNumber}`,
+  })),
+];
 
 function getHcmDateString() {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
@@ -190,11 +202,21 @@ function formatPrice(price, currency) {
 }
 
 function statusClass(status) {
-  const normalized = String(status || '').toLowerCase();
+  const normalized = normalizeListingStatus(status).key;
+  if (normalized === 'active') return 'status-active';
+  if (normalized === 'new_listing') return 'status-new';
   if (normalized === 'ended') return 'status-ended';
   if (normalized === 'out_of_stock') return 'status-out';
-  if (normalized === 'new_listing' || normalized === 'active') return 'status-new';
   return 'status-unknown';
+}
+
+function normalizeListingStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'active') return { key: 'active', label: 'ACTIVE' };
+  if (normalized === 'ended') return { key: 'ended', label: 'ENDED' };
+  if (normalized === 'new_listing') return { key: 'new_listing', label: 'NEW_LISTING' };
+  if (normalized === 'out_of_stock') return { key: 'out_of_stock', label: 'OUT_OF_STOCK' };
+  return { key: 'unknown', label: 'UNKNOWN' };
 }
 
 function toApiDate(value) {
@@ -209,7 +231,8 @@ function buildPagination(totalPages, currentPage) {
   return pages;
 }
 
-function listingRow(item) {
+function listingRow(item, mode = 'report') {
+  const normalizedStatus = normalizeListingStatus(item.listing_status);
   const image = item.image_url
     ? `<img src="${escapeHtml(item.image_url)}" alt="listing thumbnail" class="thumb" onerror="this.style.display='none'; this.nextElementSibling.style.display='grid';">`
     : '';
@@ -221,6 +244,12 @@ function listingRow(item) {
     ? `<a href="${escapeHtml(item.listing_url)}" target="_blank" rel="noopener noreferrer" class="link-action">Open</a>`
     : '<span class="link-action disabled">N/A</span>';
 
+  const categoryCell = mode === 'raw'
+    ? `<td>${escapeHtml(item.category || '-')}</td><td>${escapeHtml(item.category_name || '-')}</td>`
+    : `<td><div><strong>${escapeHtml(item.category || '-')}</strong><small>${escapeHtml(item.category_name || '-')}</small></div></td>`;
+
+  const quantityCell = mode === 'raw' ? `<td>${escapeHtml(item.quantity ?? '-')}</td>` : '';
+
   return `<tr>
     <td>
       <div class="thumb-wrap">
@@ -230,23 +259,27 @@ function listingRow(item) {
     </td>
     <td><span class="chip">${escapeHtml(item.marketplace || '-')}</span></td>
     <td><div class="listing-cell">${listingLink}<small>${escapeHtml(item.listing_id || '-')}</small></div></td>
-    <td><div><strong>${escapeHtml(item.category || '-')}</strong><small>${escapeHtml(item.category_name || '-')}</small></div></td>
+    ${categoryCell}
     <td>${escapeHtml(item.seller_or_shop || '-')}</td>
     <td>${escapeHtml(item.condition || '-')}</td>
     <td>${formatPrice(item.price, item.currency)}</td>
-    <td><span class="status-pill ${statusClass(item.listing_status)}">${escapeHtml(item.listing_status || 'unknown')}</span></td>
+    ${quantityCell}
+    <td><span class="status-pill ${statusClass(normalizedStatus.key)}">${escapeHtml(normalizedStatus.label)}</span></td>
     <td>${escapeHtml(item.research_date || '-')}</td>
     <td>${openAction}</td>
   </tr>`;
 }
 
-function listingTable(title, payload, showPagination = true) {
+function listingTable(payload, options = {}) {
+  const { mode = 'report', showPagination = true } = options;
   if (!payload) return '<div class="center-inline">Loading report...</div>';
   if (payload.error) {
     return `<div class="error">${escapeHtml(payload.error)} <button id="retry-report" type="button">Retry</button></div>`;
   }
   if (!payload.items.length) {
-    return '<div class="empty-state">Khong co listing phu hop voi bo loc</div>';
+    return mode === 'raw'
+      ? '<div class="empty-state">Không có listing trong ngày được chọn.</div>'
+      : '<div class="empty-state">Không có listing phù hợp với điều kiện của báo cáo.</div>';
   }
   const pages = buildPagination(payload.total_pages, payload.page);
   const pagination = showPagination ? `
@@ -261,11 +294,12 @@ function listingTable(title, payload, showPagination = true) {
       <table>
         <thead>
           <tr>
-            <th>Image</th><th>Marketplace</th><th>Listing</th><th>Category</th><th>Seller / Shop</th><th>Condition</th>
-            <th>Price (desc)</th><th>Status</th><th>Research date</th><th>Action</th>
+            ${mode === 'raw'
+              ? '<th>Image</th><th>Marketplace</th><th>Listing</th><th>Category</th><th>Category name</th><th>Seller / Shop</th><th>Condition</th><th>Price</th><th>Quantity</th><th>Status</th><th>Research date</th><th>Action</th>'
+              : '<th>Image</th><th>Marketplace</th><th>Listing</th><th>Category</th><th>Seller / Shop</th><th>Condition</th><th>Price</th><th>Status</th><th>Research date</th><th>Action</th>'}
           </tr>
         </thead>
-        <tbody>${payload.items.map(listingRow).join('')}</tbody>
+        <tbody>${payload.items.map((item) => listingRow(item, mode)).join('')}</tbody>
       </table>
     </div>
     ${pagination}`;
@@ -276,7 +310,7 @@ function tabsView(summary, activeReport) {
   const groupMap = Object.fromEntries(groups.map((group) => [group.key, group]));
   return `
     <div class="report-tabs">
-      <button data-report-tab="all_reports" class="${activeReport === 'all_reports' ? 'active' : ''}">All reports</button>
+      <button data-report-tab="all_listings" class="${activeReport === 'all_listings' ? 'active' : ''}">All listings <span>${summary?.total_listings_on_date || 0}</span></button>
       ${HQA_REPORTS.map((item) => {
         const group = groupMap[item.key] || {};
         const badge = group.keyword_filter_enabled
@@ -321,7 +355,21 @@ function buildListingParams(reportKey, page = 1) {
       params.set('date_to', filters.report_date);
     }
   }
-  ['q', 'marketplace', 'category_name', 'seller', 'condition', 'price_min', 'price_max'].forEach((key) => {
+  ['q', 'marketplace', 'category', 'category_name', 'seller', 'condition', 'listing_status', 'price_min', 'price_max'].forEach((key) => {
+    if (filters[key]) params.set(key, filters[key]);
+  });
+  return params;
+}
+
+function buildRawListingParams(page = 1) {
+  const filters = state.hqa.filters;
+  const params = new URLSearchParams({
+    report_date: toApiDate(filters.report_date),
+    page: String(page),
+    page_size: String(state.hqa.pageSize),
+    sort: filters.sort || 'collected_at_desc',
+  });
+  ['q', 'marketplace', 'category', 'category_name', 'seller', 'condition', 'listing_status', 'price_min', 'price_max'].forEach((key) => {
     if (filters[key]) params.set(key, filters[key]);
   });
   return params;
@@ -341,10 +389,23 @@ async function loadReportListing(reportKey, page = 1) {
   }
 }
 
+async function loadRawListing(page = 1) {
+  const params = buildRawListingParams(page);
+  state.hqa.loadingListings = true;
+  try {
+    const payload = await api(`/hqa/reports/marketplace/raw-listings?${params.toString()}`);
+    state.hqa.rawListings = payload;
+    state.hqa.page = payload.page;
+  } catch (reason) {
+    state.hqa.rawListings = { items: [], total: 0, page, page_size: state.hqa.pageSize, total_pages: 0, error: reason.message };
+  } finally {
+    state.hqa.loadingListings = false;
+  }
+}
+
 async function loadVisibleHqaListings() {
-  if (state.hqa.activeReport === 'all_reports') {
-    await Promise.all(HQA_REPORTS.map((report) => loadReportListing(report.key, 1)));
-    state.hqa.page = 1;
+  if (state.hqa.activeReport === 'all_listings') {
+    await loadRawListing(state.hqa.page);
     return;
   }
   await loadReportListing(state.hqa.activeReport, state.hqa.page);
@@ -358,7 +419,9 @@ async function renderHqa(content) {
   const summary = state.hqa.summary;
   const counts = Object.fromEntries((summary?.groups || []).map((group) => [group.key, group.count]));
   const reportMeta = Object.fromEntries((summary?.groups || []).map((group) => [group.key, group]));
-  const currentPayload = state.hqa.listingsByReport[state.hqa.activeReport];
+  const currentPayload = state.hqa.activeReport === 'all_listings'
+    ? state.hqa.rawListings
+    : state.hqa.listingsByReport[state.hqa.activeReport];
   const selectedOption = state.hqa.activeReport;
 
   content.innerHTML = `
@@ -367,16 +430,16 @@ async function renderHqa(content) {
         <div>
           <span class="eyebrow">Module</span>
           <h1>HQA Marketplace Reports</h1>
-          <p>8 bao cao listing theo nhom san pham va trang thai.</p>
+          <p>Raw listings theo ngay va 8 bang bao cao loc chuyen biet.</p>
         </div>
         <button id="refresh-data" type="button">Refresh data</button>
       </div>
       ${state.hqa.error ? `<div class="error">${escapeHtml(state.hqa.error)}</div>` : ''}
       <div class="metrics">
+        ${metric('Total listings on selected date', summary?.total_listings_on_date || 0)}
         ${metric('New listings qualified', summary?.total_new_today || 0)}
         ${metric('Ended listings', summary?.total_ended || 0)}
         ${metric('Out of stock', summary?.total_out_of_stock || 0)}
-        ${metric('Total matched', summary?.total_matched || 0)}
       </div>
       <div class="panel">
         <form class="filters hqa-filter-grid" id="hqa-filters">
@@ -390,10 +453,25 @@ async function renderHqa(content) {
             <option value="reverb" ${state.hqa.filters.marketplace === 'reverb' ? 'selected' : ''}>Reverb</option>
             <option value="etsy" ${state.hqa.filters.marketplace === 'etsy' ? 'selected' : ''}>Etsy</option>
           </select>
-          <input id="query" placeholder="Search listing title or listing ID" value="${escapeHtml(state.hqa.filters.q)}">
+          <input id="query" placeholder="Search title, listing ID, seller" value="${escapeHtml(state.hqa.filters.q)}">
+          <input id="category" placeholder="Original category" value="${escapeHtml(state.hqa.filters.category)}">
           <input id="category-name" placeholder="Category name" value="${escapeHtml(state.hqa.filters.category_name)}">
           <input id="seller" placeholder="Seller / Shop" value="${escapeHtml(state.hqa.filters.seller)}">
           <input id="condition" placeholder="Condition" value="${escapeHtml(state.hqa.filters.condition)}">
+          <select id="listing-status" aria-label="Listing status">
+            <option value="" ${state.hqa.filters.listing_status === '' ? 'selected' : ''}>All statuses</option>
+            <option value="active" ${state.hqa.filters.listing_status === 'active' ? 'selected' : ''}>ACTIVE</option>
+            <option value="ended" ${state.hqa.filters.listing_status === 'ended' ? 'selected' : ''}>ENDED</option>
+            <option value="new_listing" ${state.hqa.filters.listing_status === 'new_listing' ? 'selected' : ''}>NEW_LISTING</option>
+            <option value="out_of_stock" ${state.hqa.filters.listing_status === 'out_of_stock' ? 'selected' : ''}>OUT_OF_STOCK</option>
+            <option value="unknown" ${state.hqa.filters.listing_status === 'unknown' ? 'selected' : ''}>UNKNOWN</option>
+          </select>
+          <select id="sort" aria-label="Sort">
+            <option value="collected_at_desc" ${state.hqa.filters.sort === 'collected_at_desc' ? 'selected' : ''}>Newest collected</option>
+            <option value="price_desc" ${state.hqa.filters.sort === 'price_desc' ? 'selected' : ''}>Price high to low</option>
+            <option value="price_asc" ${state.hqa.filters.sort === 'price_asc' ? 'selected' : ''}>Price low to high</option>
+            <option value="title_asc" ${state.hqa.filters.sort === 'title_asc' ? 'selected' : ''}>Listing title A-Z</option>
+          </select>
           <input id="price-min" type="number" min="0" step="0.01" placeholder="Minimum price" value="${escapeHtml(state.hqa.filters.price_min)}">
           <input id="price-max" type="number" min="0" step="0.01" placeholder="Maximum price" value="${escapeHtml(state.hqa.filters.price_max)}">
           <div class="filter-actions">
@@ -408,18 +486,19 @@ async function renderHqa(content) {
       </div>
       <div class="panel">
         ${state.hqa.loadingListings ? '<div class="center-inline">Loading listings...</div>' : ''}
-        ${state.hqa.activeReport === 'all_reports'
-          ? HQA_REPORTS.map((report) => {
-            const payload = state.hqa.listingsByReport[report.key];
-            const meta = reportMeta[report.key] || {};
-            const badge = meta.keyword_filter_enabled
+        ${state.hqa.activeReport === 'all_listings'
+          ? `<section class="report-section"><div class="section-header"><h2>All listings</h2><span>${summary?.total_listings_on_date || 0} records</span></div>${listingTable(currentPayload, { mode: 'raw', showPagination: true })}</section>`
+          : (() => {
+            const activeMeta = reportMeta[state.hqa.activeReport] || {};
+            const activeReport = HQA_REPORTS.find((report) => report.key === state.hqa.activeReport);
+            const heading = activeReport ? `Table ${activeReport.tableNumber} - ${activeReport.label}` : state.hqa.activeReport;
+            const badge = activeMeta.keyword_filter_enabled
               ? '<small class="keyword-badge enabled">Keyword filter enabled</small>'
-              : (report.key === 'non_audio_irrelevant'
+              : (state.hqa.activeReport === 'non_audio_irrelevant'
                 ? '<small class="keyword-badge not-configured">Keyword filter not configured</small>'
                 : '<small class="keyword-badge not-required">Keyword not required</small>');
-            return `<section class="report-section"><div class="section-header"><h2>Table ${report.tableNumber} - ${escapeHtml(report.label)}</h2><span>${counts[report.key] || 0} items</span>${badge}<button type="button" data-view-all="${report.key}">View all</button></div>${listingTable(report.label, payload, false)}</section>`;
-          }).join('')
-          : listingTable(state.hqa.activeReport, currentPayload)
+            return `<section class="report-section"><div class="section-header"><h2>${escapeHtml(heading)}</h2><span>${counts[state.hqa.activeReport] || 0} records</span>${badge}</div>${listingTable(currentPayload, { mode: 'report', showPagination: true })}</section>`;
+          })()
         }
       </div>
     </section>`;
@@ -440,11 +519,6 @@ async function renderHqa(content) {
     state.hqa.page = 1;
     await renderHqa(content);
   }));
-  document.querySelectorAll('[data-view-all]').forEach((button) => button.addEventListener('click', async () => {
-    state.hqa.activeReport = button.dataset.viewAll;
-    state.hqa.page = 1;
-    await renderHqa(content);
-  }));
 
   document.getElementById('hqa-filters').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -452,11 +526,14 @@ async function renderHqa(content) {
       report_date: document.getElementById('report-date').value || getHcmDateString(),
       q: document.getElementById('query').value.trim(),
       marketplace: document.getElementById('marketplace').value,
+      category: document.getElementById('category').value.trim(),
       category_name: document.getElementById('category-name').value.trim(),
       seller: document.getElementById('seller').value.trim(),
       condition: document.getElementById('condition').value.trim(),
+      listing_status: document.getElementById('listing-status').value.trim(),
       price_min: document.getElementById('price-min').value,
       price_max: document.getElementById('price-max').value,
+      sort: document.getElementById('sort').value,
     };
     state.hqa.activeReport = document.getElementById('report-selector').value;
     state.hqa.page = 1;
@@ -468,24 +545,30 @@ async function renderHqa(content) {
       report_date: getHcmDateString(),
       q: '',
       marketplace: '',
+      category: '',
       category_name: '',
       seller: '',
       condition: '',
+      listing_status: '',
       price_min: '',
       price_max: '',
+      sort: 'collected_at_desc',
     };
+    state.hqa.activeReport = 'all_listings';
     state.hqa.page = 1;
     await renderHqa(content);
   });
 
-  if (state.hqa.activeReport !== 'all_reports') {
+  const paginationPayload = state.hqa.activeReport === 'all_listings'
+    ? state.hqa.rawListings
+    : state.hqa.listingsByReport[state.hqa.activeReport];
+  if (paginationPayload) {
     document.getElementById('page-prev')?.addEventListener('click', async () => {
       state.hqa.page = Math.max(1, state.hqa.page - 1);
       await renderHqa(content);
     });
     document.getElementById('page-next')?.addEventListener('click', async () => {
-      const payload = state.hqa.listingsByReport[state.hqa.activeReport];
-      state.hqa.page = Math.min(payload.total_pages || 1, state.hqa.page + 1);
+      state.hqa.page = Math.min(paginationPayload.total_pages || 1, state.hqa.page + 1);
       await renderHqa(content);
     });
     document.querySelectorAll('.page-btn').forEach((button) => button.addEventListener('click', async () => {

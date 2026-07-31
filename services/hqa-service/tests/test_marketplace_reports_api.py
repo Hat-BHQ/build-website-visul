@@ -13,6 +13,10 @@ def _get_ids(payload):
     return [item["listing_id"] for item in payload["items"]]
 
 
+def _raw_ids(payload):
+    return [item["listing_id"] for item in payload["items"]]
+
+
 def _insert_listing(db_session, row_id: str, listing_id: str, listing_title: str):
     db_session.execute(
         marketplace_research_results.insert(),
@@ -205,6 +209,7 @@ def test_summary_counts(client):
     response = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}")
     assert response.status_code == 200
     payload = response.json()
+    assert payload["total_listings_on_date"] == 13
     assert payload["total_new_today"] == 6
     assert payload["total_ended"] == 3
     assert payload["total_out_of_stock"] == 2
@@ -347,3 +352,193 @@ def test_table_1_not_zero_when_hyphen_format_differs(client, db_session, monkeyp
 
 def payload_total_non_zero(payload):
     return payload["total"] > 0
+
+
+def test_raw_listings_default_filter_is_report_date_only(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert set(_raw_ids(payload)) == {"RAW-23-A", "RAW-23-B", "RAW-23-C"}
+
+
+def test_raw_listings_selected_date_returns_full_date_dataset(client):
+    response = client.get(f"/internal/v1/reports/marketplace/raw-listings?report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    assert response.json()["total"] == 13
+
+
+def test_raw_listings_do_not_apply_price_gt_500_rule(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23")
+    assert response.status_code == 200
+    assert "RAW-23-A" in _raw_ids(response.json())
+
+
+def test_raw_listings_do_not_apply_keyword_filtering(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23")
+    assert response.status_code == 200
+    assert "RAW-23-A" in _raw_ids(response.json())
+
+
+def test_raw_listings_do_not_apply_allowed_source_category_filter(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23")
+    assert response.status_code == 200
+    assert "RAW-23-A" in _raw_ids(response.json())
+
+
+def test_raw_listings_return_new_listing_status(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23")
+    assert response.status_code == 200
+    statuses = {item["listing_status"] for item in response.json()["items"]}
+    assert statuses == {"new_listing"}
+
+
+def test_raw_listings_search_title(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&q=acoustic")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-A"]
+
+
+def test_raw_listings_search_listing_id(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&q=RAW-23-B")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-B"]
+
+
+def test_raw_listings_search_seller(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&q=Seller C")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-C"]
+
+
+def test_raw_listings_filter_marketplace(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&marketplace=reverb")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-B"]
+
+
+def test_raw_listings_filter_category(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&category=other")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-A"]
+
+
+def test_raw_listings_filter_category_name(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&category_name=collector parts")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-C"]
+
+
+def test_raw_listings_filter_listing_status(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&listing_status=new_listing")
+    assert response.status_code == 200
+    assert response.json()["total"] == 3
+
+
+def test_raw_listings_filter_active(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=active")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-24-ACTIVE"]
+
+
+def test_raw_listings_filter_ended(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-30&listing_status=ended")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["ENDED-TODAY"]
+
+
+def test_raw_listings_filter_new_listing(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=new_listing")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-24-NEW"]
+
+
+def test_raw_listings_filter_out_of_stock(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-30&listing_status=out_of_stock")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["OOS-TODAY"]
+
+
+def test_raw_listings_filter_unknown_with_null(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=unknown")
+    assert response.status_code == 200
+    assert "RAW-24-UNKNOWN-NULL" in _raw_ids(response.json())
+
+
+def test_raw_listings_filter_unknown_with_empty_string(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=unknown")
+    assert response.status_code == 200
+    assert "RAW-24-UNKNOWN-EMPTY" in _raw_ids(response.json())
+
+
+def test_raw_listings_filter_unknown_with_invalid_status(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=unknown")
+    assert response.status_code == 200
+    assert "RAW-24-UNKNOWN-INVALID" in _raw_ids(response.json())
+
+
+def test_raw_listings_filter_listing_status_case_insensitive(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=AcTiVe")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-24-ACTIVE"]
+
+
+def test_raw_listings_filter_price_range(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&price_min=250&price_max=400")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-C"]
+
+
+def test_raw_listings_pagination(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&page=1&page_size=2")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["total_pages"] == 2
+    assert len(payload["items"]) == 2
+
+
+def test_raw_listings_sort(client):
+    response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&sort=price_desc")
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-B", "RAW-23-C", "RAW-23-A"]
+
+
+def test_summary_total_listings_on_date_with_summary_filters(client):
+    response = client.get("/internal/v1/reports/marketplace/summary?report_date=2026-07-23&marketplace=reverb&q=reference")
+    assert response.status_code == 200
+    assert response.json()["total_listings_on_date"] == 1
+
+
+def test_raw_listings_no_database_write(client, db_session):
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().lower())
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23")
+        assert response.status_code == 200
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    forbidden = ("insert ", "update ", "delete ", "create ", "alter ", "drop ")
+    assert all(not any(statement.startswith(keyword) for keyword in forbidden) for statement in statements)
+
+
+def test_raw_listings_status_filter_no_database_write(client, db_session):
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().lower())
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        response = client.get("/internal/v1/reports/marketplace/raw-listings?report_date=2026-08-24&listing_status=unknown")
+        assert response.status_code == 200
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    forbidden = ("insert ", "update ", "delete ", "create ", "alter ", "drop ")
+    assert all(not any(statement.startswith(keyword) for keyword in forbidden) for statement in statements)

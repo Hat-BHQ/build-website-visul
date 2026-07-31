@@ -12,6 +12,7 @@ from app.service import (
     fetch_dashboard_counts,
     fetch_listing_by_id,
     fetch_listings,
+    fetch_marketplace_raw_listings,
     fetch_marketplace_report_listings,
     fetch_marketplace_report_summary,
 )
@@ -121,9 +122,11 @@ def marketplace_report_listings(
     page_size: int = Query(default=30, ge=1, le=100),
     q: str | None = None,
     marketplace: str | None = None,
+    category: str | None = None,
     category_name: str | None = None,
     seller: str | None = None,
     condition: str | None = None,
+    listing_status: str | None = None,
     price_min: float | None = Query(default=None, ge=0),
     price_max: float | None = Query(default=None, ge=0),
     sort: str = Query(default="price_desc"),
@@ -147,9 +150,11 @@ def marketplace_report_listings(
             page_size=page_size,
             q=q,
             marketplace=marketplace,
+            category=category,
             category_name=category_name,
             seller=seller,
             condition=condition,
+            listing_status=listing_status,
             price_min=price_min,
             price_max=price_max,
             sort=sort,
@@ -160,9 +165,11 @@ def marketplace_report_listings(
     applied_filters = {
         "q": q,
         "marketplace": marketplace,
+        "category": category,
         "category_name": category_name,
         "seller": seller,
         "condition": condition,
+        "listing_status": listing_status,
         "price_min": price_min,
         "price_max": price_max,
         "date_from": selected_date_from.isoformat() if selected_date_from else None,
@@ -178,6 +185,67 @@ def marketplace_report_listings(
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size if total else 0,
         "applied_filters": applied_filters,
+    }
+
+
+@app.get("/internal/v1/reports/marketplace/raw-listings")
+@app.get("/reports/marketplace/raw-listings")
+def marketplace_raw_listings(
+    report_date: date = Query(...),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+    q: str | None = None,
+    marketplace: str | None = None,
+    category: str | None = None,
+    category_name: str | None = None,
+    seller: str | None = None,
+    condition: str | None = None,
+    listing_status: str | None = None,
+    price_min: float | None = Query(default=None, ge=0),
+    price_max: float | None = Query(default=None, ge=0),
+    sort: str = Query(default="collected_at_desc"),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.listings.view")),
+):
+    try:
+        items, total = fetch_marketplace_raw_listings(
+            db,
+            report_date=report_date,
+            page=page,
+            page_size=page_size,
+            q=q,
+            marketplace=marketplace,
+            category=category,
+            category_name=category_name,
+            seller=seller,
+            condition=condition,
+            listing_status=listing_status,
+            price_min=price_min,
+            price_max=price_max,
+            sort=sort,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "report_date": report_date.isoformat(),
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if total else 0,
+        "applied_filters": {
+            "q": q,
+            "marketplace": marketplace,
+            "category": category,
+            "category_name": category_name,
+            "seller": seller,
+            "condition": condition,
+            "listing_status": listing_status,
+            "price_min": price_min,
+            "price_max": price_max,
+            "sort": sort,
+        },
     }
 
 

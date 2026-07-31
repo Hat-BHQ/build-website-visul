@@ -23,8 +23,19 @@ def _normalize_category_name(expr):
     return func.rtrim(_normalize_text(expr), ".")
 
 
+def _raw_status_expression():
+    return _normalize_text(listing_table.c.listing_status)
+
+
 def _status_expression():
-    return func.coalesce(func.nullif(_normalize_text(listing_table.c.listing_status), ""), literal("unknown"))
+    raw_status = _raw_status_expression()
+    return case(
+        (raw_status == "active", literal("active")),
+        (raw_status == "ended", literal("ended")),
+        (raw_status == "new_listing", literal("new_listing")),
+        (raw_status == "out_of_stock", literal("out_of_stock")),
+        else_=literal("unknown"),
+    )
 
 
 def _normalized_title_expression():
@@ -131,9 +142,11 @@ def _apply_common_ui_filters(
     *,
     q: str | None,
     marketplace: str | None,
+    category: str | None,
     category_name: str | None,
     seller: str | None,
     condition: str | None,
+    listing_status: str | None,
     price_min: Decimal | float | None,
     price_max: Decimal | float | None,
 ):
@@ -147,12 +160,19 @@ def _apply_common_ui_filters(
         )
     if marketplace:
         statement = statement.where(_normalize_text(listing_table.c.marketplace) == marketplace.strip().lower())
+    if category:
+        statement = statement.where(_normalize_text(listing_table.c.category) == category.strip().lower())
     if category_name:
         statement = statement.where(_normalize_category_name(listing_table.c.category_name) == category_name.strip().lower().rstrip("."))
     if seller:
         statement = statement.where(_normalize_text(listing_table.c.seller_or_shop).ilike(f"%{seller.strip().lower()}%"))
     if condition:
         statement = statement.where(_normalize_text(listing_table.c["condition"]) == condition.strip().lower())
+    if listing_status:
+        normalized_status = listing_status.strip().lower()
+        if normalized_status not in {"active", "ended", "new_listing", "out_of_stock", "unknown"}:
+            raise ValueError("Invalid listing_status")
+        statement = statement.where(_status_expression() == normalized_status)
     if price_min is not None:
         statement = statement.where(func.coalesce(listing_table.c.price, 0) >= price_min)
     if price_max is not None:
@@ -160,7 +180,7 @@ def _apply_common_ui_filters(
     return statement
 
 
-def _apply_sort(statement, sort: str):
+def _apply_report_sort(statement, sort: str):
     if sort != "price_desc":
         raise ValueError("Invalid sort option")
     return statement.order_by(
@@ -168,6 +188,34 @@ def _apply_sort(statement, sort: str):
         listing_table.c.price.desc(),
         listing_table.c.id.desc(),
     )
+
+
+def _apply_raw_sort(statement, sort: str):
+    if sort == "collected_at_desc":
+        return statement.order_by(
+            listing_table.c.collected_at.is_(None),
+            listing_table.c.collected_at.desc(),
+            listing_table.c.id.desc(),
+        )
+    if sort == "price_desc":
+        return statement.order_by(
+            listing_table.c.price.is_(None),
+            listing_table.c.price.desc(),
+            listing_table.c.id.desc(),
+        )
+    if sort == "price_asc":
+        return statement.order_by(
+            listing_table.c.price.is_(None),
+            listing_table.c.price.asc(),
+            listing_table.c.id.desc(),
+        )
+    if sort == "title_asc":
+        return statement.order_by(
+            listing_table.c.listing_title.is_(None),
+            _normalize_text(listing_table.c.listing_title).asc(),
+            listing_table.c.id.desc(),
+        )
+    raise ValueError("Invalid sort option")
 
 
 def _build_report_statement(
@@ -178,9 +226,11 @@ def _build_report_statement(
     date_to: date | None,
     q: str | None,
     marketplace: str | None,
+    category: str | None,
     category_name: str | None,
     seller: str | None,
     condition: str | None,
+    listing_status: str | None,
     price_min: Decimal | float | None,
     price_max: Decimal | float | None,
 ):
@@ -221,9 +271,51 @@ def _build_report_statement(
         statement,
         q=q,
         marketplace=marketplace,
+        category=category,
         category_name=category_name,
         seller=seller,
         condition=condition,
+        listing_status=listing_status,
+        price_min=price_min,
+        price_max=price_max,
+    )
+    return statement
+
+
+def _build_raw_listings_statement(
+    *,
+    report_date: date,
+    q: str | None,
+    marketplace: str | None,
+    category: str | None,
+    category_name: str | None,
+    seller: str | None,
+    condition: str | None,
+    listing_status: str | None,
+    price_min: Decimal | float | None,
+    price_max: Decimal | float | None,
+):
+    statement = _listing_base_select().where(listing_table.c.research_date == report_date)
+
+    if q:
+        pattern = f"%{q.strip()}%"
+        statement = statement.where(
+            or_(
+                listing_table.c.listing_title.ilike(pattern),
+                listing_table.c.listing_id.ilike(pattern),
+                listing_table.c.seller_or_shop.ilike(pattern),
+            )
+        )
+
+    statement = _apply_common_ui_filters(
+        statement,
+        q=None,
+        marketplace=marketplace,
+        category=category,
+        category_name=category_name,
+        seller=seller,
+        condition=condition,
+        listing_status=listing_status,
         price_min=price_min,
         price_max=price_max,
     )
@@ -248,9 +340,11 @@ def fetch_marketplace_report_summary(
             date_to=None,
             q=q,
             marketplace=marketplace,
+            category=None,
             category_name=None,
             seller=None,
             condition=None,
+            listing_status=None,
             price_min=None,
             price_max=None,
         )
@@ -270,9 +364,25 @@ def fetch_marketplace_report_summary(
     total_new_today = sum(count_map[key] for key in ["main_repeated", "amplifier_receiver", "speaker_parts", "other_home_audio", "vintage_accessories", "non_audio_irrelevant"])
     total_ended = count_map["ended"]
     total_out_of_stock = count_map["out_of_stock"]
+    raw_total_statement = _build_raw_listings_statement(
+        report_date=report_date,
+        q=q,
+        marketplace=marketplace,
+        category=None,
+        category_name=None,
+        seller=None,
+        condition=None,
+        listing_status=None,
+        price_min=None,
+        price_max=None,
+    )
+    total_listings_on_date = int(
+        db.execute(select(func.count()).select_from(raw_total_statement.order_by(None).subquery())).scalar_one() or 0
+    )
 
     return {
         "report_date": report_date.isoformat(),
+        "total_listings_on_date": total_listings_on_date,
         "total_new_today": total_new_today,
         "total_ended": total_ended,
         "total_out_of_stock": total_out_of_stock,
@@ -292,9 +402,11 @@ def fetch_marketplace_report_listings(
     page_size: int,
     q: str | None,
     marketplace: str | None,
+    category: str | None,
     category_name: str | None,
     seller: str | None,
     condition: str | None,
+    listing_status: str | None,
     price_min: Decimal | float | None,
     price_max: Decimal | float | None,
     sort: str,
@@ -311,17 +423,56 @@ def fetch_marketplace_report_listings(
         date_to=date_to,
         q=q,
         marketplace=marketplace,
+        category=category,
         category_name=category_name,
         seller=seller,
         condition=condition,
+        listing_status=listing_status,
         price_min=price_min,
         price_max=price_max,
     )
     count_query = select(func.count()).select_from(statement.order_by(None).subquery())
     total = int(db.execute(count_query).scalar_one() or 0)
 
-    data_query = _apply_sort(statement, sort).offset((page - 1) * page_size).limit(page_size)
+    data_query = _apply_report_sort(statement, sort).offset((page - 1) * page_size).limit(page_size)
     rows = db.execute(data_query).mappings().all()
+    return [dict(row) for row in rows], total
+
+
+def fetch_marketplace_raw_listings(
+    db: Session,
+    *,
+    report_date: date,
+    page: int,
+    page_size: int,
+    q: str | None,
+    marketplace: str | None,
+    category: str | None,
+    category_name: str | None,
+    seller: str | None,
+    condition: str | None,
+    listing_status: str | None,
+    price_min: Decimal | float | None,
+    price_max: Decimal | float | None,
+    sort: str,
+) -> tuple[list[dict], int]:
+    if price_min is not None and price_max is not None and price_min > price_max:
+        raise ValueError("price_min must be <= price_max")
+
+    statement = _build_raw_listings_statement(
+        report_date=report_date,
+        q=q,
+        marketplace=marketplace,
+        category=category,
+        category_name=category_name,
+        seller=seller,
+        condition=condition,
+        listing_status=listing_status,
+        price_min=price_min,
+        price_max=price_max,
+    )
+    total = int(db.execute(select(func.count()).select_from(statement.order_by(None).subquery())).scalar_one() or 0)
+    rows = db.execute(_apply_raw_sort(statement, sort).offset((page - 1) * page_size).limit(page_size)).mappings().all()
     return [dict(row) for row in rows], total
 
 
