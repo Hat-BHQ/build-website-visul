@@ -13,14 +13,47 @@ const state = {
     error: '',
     rawListings: null,
     listingsByReport: {},
-    filters: {
+    loadingFilterOptions: false,
+    filterOptionsError: '',
+    filterOptionsRequestId: 0,
+    filterOptions: {
+      brands: { items: [], truncated: false },
+      models: { items: [], truncated: false },
+      categories: { items: [], truncated: false },
+      listing_locations: { items: [], truncated: false },
+      conditions: { items: [], truncated: false },
+      category_names: { items: [], truncated: false },
+      buying_options: { items: [], truncated: false },
+    },
+    appliedFilters: {
       report_date: getHcmDateString(),
       q: '',
       marketplace: '',
+      brand: '',
+      model: '',
       category: '',
+      listing_location: '',
       category_name: '',
       seller: '',
       condition: '',
+      buying_options: '',
+      listing_status: '',
+      price_min: '',
+      price_max: '',
+      sort: 'collected_at_desc',
+    },
+    draftFilters: {
+      report_date: getHcmDateString(),
+      q: '',
+      marketplace: '',
+      brand: '',
+      model: '',
+      category: '',
+      listing_location: '',
+      category_name: '',
+      seller: '',
+      condition: '',
+      buying_options: '',
       listing_status: '',
       price_min: '',
       price_max: '',
@@ -122,7 +155,7 @@ function renderLogin(error = '') {
         <div class="brand-mark">HQ</div>
         <h1>HQ Platform</h1>
         <p>Sign in to access assigned modules.</p>
-        <label>Email<input id="email" value="root@example.com" type="email" required></label>
+        <label>Email<input id="email" value="" type="email" autocomplete="username" required></label>
         <label>Password<input id="password" value="ChangeMe123!" type="password" required></label>
         ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
         <button id="login-button">Sign in</button>
@@ -323,11 +356,128 @@ function tabsView(summary, activeReport) {
     </div>`;
 }
 
+function getHqaFilterScope() {
+  if (state.hqa.activeReport === 'all_listings') {
+    return { view: 'all_listings', report_key: '' };
+  }
+  return { view: 'report', report_key: state.hqa.activeReport };
+}
+
+function buildFilterOptionSelect(fieldKey, allLabel, responseKey) {
+  const selected = state.hqa.draftFilters[fieldKey] || '';
+  const disabled = state.hqa.loadingFilterOptions;
+  const options = state.hqa.filterOptions[responseKey]?.items || [];
+  const available = new Set(options.map((item) => item.value));
+  const showFallback = selected && !available.has(selected);
+  const loadingOption = disabled ? '<option value="">Loading...</option>' : '';
+  const fallbackOption = showFallback ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (unavailable)</option>` : '';
+
+  return `
+    <select id="${fieldKey}" aria-label="${allLabel}" ${disabled ? 'disabled' : ''}>
+      <option value="" ${selected === '' ? 'selected' : ''}>${escapeHtml(allLabel)}</option>
+      ${loadingOption}
+      ${fallbackOption}
+      ${options.map((item) => `<option value="${escapeHtml(item.value)}" ${item.value === selected ? 'selected' : ''}>${escapeHtml(item.label)} (${item.count})</option>`).join('')}
+    </select>`;
+}
+
+function buildFilterOptionsParams() {
+  const scope = getHqaFilterScope();
+  const filters = state.hqa.draftFilters;
+  const params = new URLSearchParams({
+    report_date: toApiDate(filters.report_date),
+    view: scope.view,
+  });
+  if (scope.report_key) params.set('report_key', scope.report_key);
+  [
+    'q',
+    'marketplace',
+    'brand',
+    'model',
+    'category',
+    'listing_location',
+    'condition',
+    'category_name',
+    'buying_options',
+    'listing_status',
+    'seller',
+    'price_min',
+    'price_max',
+  ].forEach((key) => {
+    if (filters[key]) params.set(key, filters[key]);
+  });
+  return params;
+}
+
+function sanitizeDraftFiltersByOptions() {
+  const mapping = {
+    brand: 'brands',
+    model: 'models',
+    category: 'categories',
+    listing_location: 'listing_locations',
+    condition: 'conditions',
+    category_name: 'category_names',
+    buying_options: 'buying_options',
+  };
+  Object.entries(mapping).forEach(([filterKey, responseKey]) => {
+    const value = state.hqa.draftFilters[filterKey];
+    if (!value) return;
+    const items = state.hqa.filterOptions[responseKey]?.items || [];
+    const hasValue = items.some((item) => item.value === value);
+    if (!hasValue) state.hqa.draftFilters[filterKey] = '';
+  });
+}
+
+async function loadHqaFilterOptions() {
+  const requestId = state.hqa.filterOptionsRequestId + 1;
+  state.hqa.filterOptionsRequestId = requestId;
+  state.hqa.loadingFilterOptions = true;
+  state.hqa.filterOptionsError = '';
+  const params = buildFilterOptionsParams();
+  try {
+    const payload = await api(`/hqa/reports/marketplace/filter-options?${params.toString()}`);
+    if (requestId !== state.hqa.filterOptionsRequestId) return;
+    state.hqa.filterOptions = payload.options || state.hqa.filterOptions;
+    sanitizeDraftFiltersByOptions();
+  } catch (reason) {
+    if (requestId !== state.hqa.filterOptionsRequestId) return;
+    state.hqa.filterOptionsError = reason.message;
+    state.hqa.filterOptions = {
+      brands: { items: [], truncated: false },
+      models: { items: [], truncated: false },
+      categories: { items: [], truncated: false },
+      listing_locations: { items: [], truncated: false },
+      conditions: { items: [], truncated: false },
+      category_names: { items: [], truncated: false },
+      buying_options: { items: [], truncated: false },
+    };
+  } finally {
+    if (requestId === state.hqa.filterOptionsRequestId) {
+      state.hqa.loadingFilterOptions = false;
+    }
+  }
+}
+
 async function loadHqaSummary() {
-  const reportDate = toApiDate(state.hqa.filters.report_date);
+  const reportDate = toApiDate(state.hqa.appliedFilters.report_date);
   const params = new URLSearchParams({ report_date: reportDate });
-  if (state.hqa.filters.marketplace) params.set('marketplace', state.hqa.filters.marketplace);
-  if (state.hqa.filters.q) params.set('q', state.hqa.filters.q);
+  [
+    'marketplace',
+    'q',
+    'brand',
+    'model',
+    'category',
+    'listing_location',
+    'condition',
+    'category_name',
+    'buying_options',
+    'listing_status',
+    'seller',
+    'price_min',
+    'price_max',
+  ].forEach((key) => {
+    if (state.hqa.appliedFilters[key]) params.set(key, state.hqa.appliedFilters[key]);
+  });
   state.hqa.loadingSummary = true;
   state.hqa.error = '';
   try {
@@ -340,7 +490,7 @@ async function loadHqaSummary() {
 }
 
 function buildListingParams(reportKey, page = 1) {
-  const filters = state.hqa.filters;
+  const filters = state.hqa.appliedFilters;
   const params = new URLSearchParams({
     report_key: reportKey,
     page: String(page),
@@ -355,21 +505,21 @@ function buildListingParams(reportKey, page = 1) {
       params.set('date_to', filters.report_date);
     }
   }
-  ['q', 'marketplace', 'category', 'category_name', 'seller', 'condition', 'listing_status', 'price_min', 'price_max'].forEach((key) => {
+  ['q', 'marketplace', 'brand', 'model', 'category', 'listing_location', 'category_name', 'seller', 'condition', 'buying_options', 'listing_status', 'price_min', 'price_max'].forEach((key) => {
     if (filters[key]) params.set(key, filters[key]);
   });
   return params;
 }
 
 function buildRawListingParams(page = 1) {
-  const filters = state.hqa.filters;
+  const filters = state.hqa.appliedFilters;
   const params = new URLSearchParams({
     report_date: toApiDate(filters.report_date),
     page: String(page),
     page_size: String(state.hqa.pageSize),
     sort: filters.sort || 'collected_at_desc',
   });
-  ['q', 'marketplace', 'category', 'category_name', 'seller', 'condition', 'listing_status', 'price_min', 'price_max'].forEach((key) => {
+  ['q', 'marketplace', 'brand', 'model', 'category', 'listing_location', 'category_name', 'seller', 'condition', 'buying_options', 'listing_status', 'price_min', 'price_max'].forEach((key) => {
     if (filters[key]) params.set(key, filters[key]);
   });
   return params;
@@ -411,10 +561,20 @@ async function loadVisibleHqaListings() {
   await loadReportListing(state.hqa.activeReport, state.hqa.page);
 }
 
-async function renderHqa(content) {
+async function renderHqa(content, options = {}) {
+  const { reloadData = true } = options;
   content.innerHTML = '<div class="center-inline">Loading HQA reports...</div>';
-  await loadHqaSummary();
-  await loadVisibleHqaListings();
+  if (!state.hqa.draftFilters.report_date) {
+    state.hqa.draftFilters.report_date = getHcmDateString();
+  }
+  if (!state.hqa.appliedFilters.report_date) {
+    state.hqa.appliedFilters.report_date = state.hqa.draftFilters.report_date;
+  }
+  await loadHqaFilterOptions();
+  if (reloadData) {
+    await loadHqaSummary();
+    await loadVisibleHqaListings();
+  }
 
   const summary = state.hqa.summary;
   const counts = Object.fromEntries((summary?.groups || []).map((group) => [group.key, group.count]));
@@ -443,43 +603,48 @@ async function renderHqa(content) {
       </div>
       <div class="panel">
         <form class="filters hqa-filter-grid" id="hqa-filters">
-          <input id="report-date" type="date" value="${escapeHtml(state.hqa.filters.report_date)}" aria-label="Report date">
+          <input id="report-date" type="date" value="${escapeHtml(state.hqa.draftFilters.report_date)}" aria-label="Report date">
           <select id="report-selector" aria-label="Report selector">
             ${HQA_REPORT_OPTIONS.map((option) => `<option value="${option.key}" ${option.key === selectedOption ? 'selected' : ''}>${escapeHtml(option.label)}</option>`).join('')}
           </select>
           <select id="marketplace" aria-label="Marketplace">
             <option value="">All marketplaces</option>
-            <option value="ebay" ${state.hqa.filters.marketplace === 'ebay' ? 'selected' : ''}>eBay</option>
-            <option value="reverb" ${state.hqa.filters.marketplace === 'reverb' ? 'selected' : ''}>Reverb</option>
-            <option value="etsy" ${state.hqa.filters.marketplace === 'etsy' ? 'selected' : ''}>Etsy</option>
+            <option value="ebay" ${state.hqa.draftFilters.marketplace === 'ebay' ? 'selected' : ''}>eBay</option>
+            <option value="reverb" ${state.hqa.draftFilters.marketplace === 'reverb' ? 'selected' : ''}>Reverb</option>
+            <option value="etsy" ${state.hqa.draftFilters.marketplace === 'etsy' ? 'selected' : ''}>Etsy</option>
           </select>
-          <input id="query" placeholder="Search title, listing ID, seller" value="${escapeHtml(state.hqa.filters.q)}">
-          <input id="category" placeholder="Original category" value="${escapeHtml(state.hqa.filters.category)}">
-          <input id="category-name" placeholder="Category name" value="${escapeHtml(state.hqa.filters.category_name)}">
-          <input id="seller" placeholder="Seller / Shop" value="${escapeHtml(state.hqa.filters.seller)}">
-          <input id="condition" placeholder="Condition" value="${escapeHtml(state.hqa.filters.condition)}">
+          <input id="query" placeholder="Search title, listing ID, seller" value="${escapeHtml(state.hqa.draftFilters.q)}">
+          ${buildFilterOptionSelect('brand', 'All brands', 'brands')}
+          ${buildFilterOptionSelect('model', 'All models', 'models')}
+          ${buildFilterOptionSelect('category', 'All categories', 'categories')}
+          ${buildFilterOptionSelect('listing_location', 'All locations', 'listing_locations')}
+          ${buildFilterOptionSelect('condition', 'All conditions', 'conditions')}
+          ${buildFilterOptionSelect('category_name', 'All category names', 'category_names')}
+          ${buildFilterOptionSelect('buying_options', 'All buying options', 'buying_options')}
+          <input id="seller" placeholder="Seller / Shop" value="${escapeHtml(state.hqa.draftFilters.seller)}">
           <select id="listing-status" aria-label="Listing status">
-            <option value="" ${state.hqa.filters.listing_status === '' ? 'selected' : ''}>All statuses</option>
-            <option value="active" ${state.hqa.filters.listing_status === 'active' ? 'selected' : ''}>ACTIVE</option>
-            <option value="ended" ${state.hqa.filters.listing_status === 'ended' ? 'selected' : ''}>ENDED</option>
-            <option value="new_listing" ${state.hqa.filters.listing_status === 'new_listing' ? 'selected' : ''}>NEW_LISTING</option>
-            <option value="out_of_stock" ${state.hqa.filters.listing_status === 'out_of_stock' ? 'selected' : ''}>OUT_OF_STOCK</option>
-            <option value="unknown" ${state.hqa.filters.listing_status === 'unknown' ? 'selected' : ''}>UNKNOWN</option>
+            <option value="" ${state.hqa.draftFilters.listing_status === '' ? 'selected' : ''}>All statuses</option>
+            <option value="active" ${state.hqa.draftFilters.listing_status === 'active' ? 'selected' : ''}>ACTIVE</option>
+            <option value="ended" ${state.hqa.draftFilters.listing_status === 'ended' ? 'selected' : ''}>ENDED</option>
+            <option value="new_listing" ${state.hqa.draftFilters.listing_status === 'new_listing' ? 'selected' : ''}>NEW_LISTING</option>
+            <option value="out_of_stock" ${state.hqa.draftFilters.listing_status === 'out_of_stock' ? 'selected' : ''}>OUT_OF_STOCK</option>
+            <option value="unknown" ${state.hqa.draftFilters.listing_status === 'unknown' ? 'selected' : ''}>UNKNOWN</option>
           </select>
           <select id="sort" aria-label="Sort">
-            <option value="collected_at_desc" ${state.hqa.filters.sort === 'collected_at_desc' ? 'selected' : ''}>Newest collected</option>
-            <option value="price_desc" ${state.hqa.filters.sort === 'price_desc' ? 'selected' : ''}>Price high to low</option>
-            <option value="price_asc" ${state.hqa.filters.sort === 'price_asc' ? 'selected' : ''}>Price low to high</option>
-            <option value="title_asc" ${state.hqa.filters.sort === 'title_asc' ? 'selected' : ''}>Listing title A-Z</option>
+            <option value="collected_at_desc" ${state.hqa.draftFilters.sort === 'collected_at_desc' ? 'selected' : ''}>Newest collected</option>
+            <option value="price_desc" ${state.hqa.draftFilters.sort === 'price_desc' ? 'selected' : ''}>Price high to low</option>
+            <option value="price_asc" ${state.hqa.draftFilters.sort === 'price_asc' ? 'selected' : ''}>Price low to high</option>
+            <option value="title_asc" ${state.hqa.draftFilters.sort === 'title_asc' ? 'selected' : ''}>Listing title A-Z</option>
           </select>
-          <input id="price-min" type="number" min="0" step="0.01" placeholder="Minimum price" value="${escapeHtml(state.hqa.filters.price_min)}">
-          <input id="price-max" type="number" min="0" step="0.01" placeholder="Maximum price" value="${escapeHtml(state.hqa.filters.price_max)}">
+          <input id="price-min" type="number" min="0" step="0.01" placeholder="Minimum price" value="${escapeHtml(state.hqa.draftFilters.price_min)}">
+          <input id="price-max" type="number" min="0" step="0.01" placeholder="Maximum price" value="${escapeHtml(state.hqa.draftFilters.price_max)}">
           <div class="filter-actions">
             <button type="submit">Apply filters</button>
             <button id="reset-filters" type="button">Reset filters</button>
             <button id="refresh-inline" type="button">Refresh data</button>
           </div>
         </form>
+        ${state.hqa.filterOptionsError ? `<div class="error">Khong the tai danh sach filter options. ${escapeHtml(state.hqa.filterOptionsError)}</div>` : ''}
       </div>
       <div class="panel">
         ${tabsView(summary, state.hqa.activeReport)}
@@ -504,56 +669,103 @@ async function renderHqa(content) {
     </section>`;
 
   document.getElementById('refresh-data').addEventListener('click', async () => {
+    state.hqa.draftFilters = { ...state.hqa.appliedFilters };
     await renderHqa(content);
   });
   document.getElementById('refresh-inline').addEventListener('click', async () => {
+    state.hqa.draftFilters = { ...state.hqa.appliedFilters };
     await renderHqa(content);
   });
   document.getElementById('report-selector').addEventListener('change', async (event) => {
     state.hqa.activeReport = event.target.value;
+    state.hqa.draftFilters.report_date = document.getElementById('report-date').value || state.hqa.draftFilters.report_date;
     state.hqa.page = 1;
     await renderHqa(content);
   });
   document.querySelectorAll('[data-report-tab]').forEach((button) => button.addEventListener('click', async () => {
     state.hqa.activeReport = button.dataset.reportTab;
+    state.hqa.draftFilters.report_date = document.getElementById('report-date').value || state.hqa.draftFilters.report_date;
     state.hqa.page = 1;
     await renderHqa(content);
   }));
 
+  const debounceOptionRefresh = (() => {
+    let timer = null;
+    return () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        state.hqa.draftFilters = {
+          ...state.hqa.draftFilters,
+          report_date: document.getElementById('report-date').value || getHcmDateString(),
+          q: document.getElementById('query').value.trim(),
+          marketplace: document.getElementById('marketplace').value,
+          brand: document.getElementById('brand').value,
+          model: document.getElementById('model').value,
+          category: document.getElementById('category').value,
+          listing_location: document.getElementById('listing_location').value,
+          category_name: document.getElementById('category_name').value,
+          seller: document.getElementById('seller').value.trim(),
+          condition: document.getElementById('condition').value,
+          buying_options: document.getElementById('buying_options').value,
+          listing_status: document.getElementById('listing-status').value.trim(),
+          price_min: document.getElementById('price-min').value,
+          price_max: document.getElementById('price-max').value,
+          sort: document.getElementById('sort').value,
+        };
+        await renderHqa(content, { reloadData: false });
+      }, 250);
+    };
+  })();
+
+  ['report-date', 'marketplace', 'brand', 'model', 'category', 'listing_location', 'category_name', 'condition', 'buying_options', 'listing-status'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', debounceOptionRefresh);
+  });
+
   document.getElementById('hqa-filters').addEventListener('submit', async (event) => {
     event.preventDefault();
-    state.hqa.filters = {
+    state.hqa.draftFilters = {
       report_date: document.getElementById('report-date').value || getHcmDateString(),
       q: document.getElementById('query').value.trim(),
       marketplace: document.getElementById('marketplace').value,
-      category: document.getElementById('category').value.trim(),
-      category_name: document.getElementById('category-name').value.trim(),
+      brand: document.getElementById('brand').value,
+      model: document.getElementById('model').value,
+      category: document.getElementById('category').value,
+      listing_location: document.getElementById('listing_location').value,
+      category_name: document.getElementById('category_name').value,
       seller: document.getElementById('seller').value.trim(),
-      condition: document.getElementById('condition').value.trim(),
+      condition: document.getElementById('condition').value,
+      buying_options: document.getElementById('buying_options').value,
       listing_status: document.getElementById('listing-status').value.trim(),
       price_min: document.getElementById('price-min').value,
       price_max: document.getElementById('price-max').value,
       sort: document.getElementById('sort').value,
     };
+    state.hqa.appliedFilters = { ...state.hqa.draftFilters };
     state.hqa.activeReport = document.getElementById('report-selector').value;
     state.hqa.page = 1;
     await renderHqa(content);
   });
 
   document.getElementById('reset-filters').addEventListener('click', async () => {
-    state.hqa.filters = {
+    const resetFilters = {
       report_date: getHcmDateString(),
       q: '',
       marketplace: '',
+      brand: '',
+      model: '',
       category: '',
+      listing_location: '',
       category_name: '',
       seller: '',
       condition: '',
+      buying_options: '',
       listing_status: '',
       price_min: '',
       price_max: '',
       sort: 'collected_at_desc',
     };
+    state.hqa.draftFilters = { ...resetFilters };
+    state.hqa.appliedFilters = { ...resetFilters };
     state.hqa.activeReport = 'all_listings';
     state.hqa.page = 1;
     await renderHqa(content);

@@ -542,3 +542,191 @@ def test_raw_listings_status_filter_no_database_write(client, db_session):
 
     forbidden = ("insert ", "update ", "delete ", "create ", "alter ", "drop ")
     assert all(not any(statement.startswith(keyword) for keyword in forbidden) for statement in statements)
+
+
+def test_filter_options_returns_200(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["view"] == "all_listings"
+    assert "options" in payload
+
+
+def test_filter_options_buying_options_no_grouping_error(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23")
+    assert response.status_code == 200
+    buying = response.json()["options"]["buying_options"]["items"]
+    values = {item["value"] for item in buying}
+    assert "fixed_price" in values
+    assert "best_offer" in values
+
+
+def test_filter_options_case_insensitive_grouping(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23")
+    assert response.status_code == 200
+    brands = response.json()["options"]["brands"]["items"]
+    brand_map = {item["value"]: item for item in brands}
+    assert "jbl" in brand_map
+    assert brand_map["jbl"]["count"] == 2
+
+
+def test_filter_options_empty_null_values_do_not_crash(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-08-24")
+    assert response.status_code == 200
+    payload = response.json()
+    brands = payload["options"]["brands"]["items"]
+    buying = payload["options"]["buying_options"]["items"]
+    assert any(item["value"] == "__unknown__" for item in brands)
+    assert any(item["value"] == "__unknown__" for item in buying)
+
+
+def test_filter_options_no_database_write(client, db_session):
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().lower())
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23")
+        assert response.status_code == 200
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    forbidden = ("insert ", "update ", "delete ", "create ", "alter ", "drop ")
+    assert all(not any(statement.startswith(keyword) for keyword in forbidden) for statement in statements)
+
+
+def test_filter_options_scoped_by_report_date(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
+    brands = response.json()["options"]["brands"]["items"]
+    values = {item["value"] for item in brands}
+    assert "jbl" in values
+    assert "testbrand" not in values
+
+
+def test_filter_options_all_listings_not_using_report_business_rules(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
+    categories = {item["value"] for item in response.json()["options"]["categories"]["items"]}
+    assert "other" in categories
+
+
+def test_filter_options_report_scope_matches_report_rules(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/filter-options?report_date={REPORT_DATE.isoformat()}&view=report&report_key=main_repeated"
+    )
+    assert response.status_code == 200
+    categories = {item["value"] for item in response.json()["options"]["categories"]["items"]}
+    assert "other" not in categories
+
+
+def test_filter_options_fields_are_loaded_from_db(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
+    options = response.json()["options"]
+    assert options["brands"]["items"]
+    assert options["models"]["items"]
+    assert options["categories"]["items"]
+    assert options["listing_locations"]["items"]
+    assert options["conditions"]["items"]
+    assert options["category_names"]["items"]
+    assert options["buying_options"]["items"]
+
+
+def test_filter_options_buying_options_normalization(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
+    buying_items = response.json()["options"]["buying_options"]["items"]
+    values = {item["value"] for item in buying_items}
+    assert "fixed_price" in values
+    assert "best_offer" in values
+
+
+def test_filter_options_exclude_empty_values_but_include_unknown_when_present(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-08-24&view=all_listings")
+    assert response.status_code == 200
+    brands = response.json()["options"]["brands"]["items"]
+    assert all(item["value"] != "" for item in brands)
+    assert any(item["value"] == "__unknown__" for item in brands)
+
+
+def test_filter_options_case_insensitive_dedup_and_counts(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
+    brands = response.json()["options"]["brands"]["items"]
+    jbl = next(item for item in brands if item["value"] == "jbl")
+    assert jbl["count"] == 2
+
+
+def test_filter_options_sorted_az(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
+    labels = [item["label"] for item in response.json()["options"]["brands"]["items"]]
+    assert labels == sorted(labels, key=str.lower)
+
+
+def test_filter_options_faceted_brand_narrows_models(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings&brand=jbl")
+    assert response.status_code == 200
+    models = {item["value"] for item in response.json()["options"]["models"]["items"]}
+    assert models == {"l100"}
+
+
+def test_filter_options_ignores_self_filter_for_field(client):
+    response = client.get(
+        "/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings&brand=jbl&model=l100"
+    )
+    assert response.status_code == 200
+    brands = {item["value"] for item in response.json()["options"]["brands"]["items"]}
+    assert "pioneer" in brands
+
+
+def test_raw_listings_apply_all_new_filters(client):
+    response = client.get(
+        "/internal/v1/reports/marketplace/raw-listings?report_date=2026-07-23&brand=jbl&model=l100&category=speaker%20frame&listing_location=vn&condition=new&category_name=frame%20components&buying_options=fixed_price"
+    )
+    assert response.status_code == 200
+    assert _raw_ids(response.json()) == ["RAW-23-B"]
+
+
+def test_report_listings_apply_new_filters_as_additional_conditions(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/listings?report_key=speaker_parts&report_date={REPORT_DATE.isoformat()}&brand=jbl&model=l100&category=speaker%20frame&listing_location=vn&condition=new&category_name=other%20speaker%20parts%20%26%20comp&buying_options=best_offer"
+    )
+    assert response.status_code == 200
+    assert _get_ids(response.json()) == ["G3-OK"]
+
+
+def test_filter_options_no_sql_injection(client):
+    response = client.get(
+        "/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings&brand=' OR 1=1 --"
+    )
+    assert response.status_code == 200
+
+
+def test_filter_options_no_database_write(client, db_session):
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().lower())
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+        assert response.status_code == 200
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    forbidden = ("insert ", "update ", "delete ", "create ", "alter ", "drop ")
+    assert all(not any(statement.startswith(keyword) for keyword in forbidden) for statement in statements)
+
+
+def test_filter_options_request_does_not_call_network(client, monkeypatch):
+    def blocked_connect(*args, **kwargs):
+        raise AssertionError("Network call should not happen during filter options request")
+
+    monkeypatch.setattr(socket, "create_connection", blocked_connect)
+    response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
+    assert response.status_code == 200
