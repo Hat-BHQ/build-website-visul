@@ -947,6 +947,30 @@ def test_all_listings_new_endpoint_returns_paginated_rows(client):
     assert "total" in payload
 
 
+def test_internal_listings_returns_new_datetime_fields(client):
+    response = client.get("/internal/v1/listings?q=G1-OK&page=1&page_size=10")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"]
+    item = payload["items"][0]
+    assert "listing_published_at" in item
+    assert "last_status_checked_at" in item
+    assert item["listing_published_at"] is not None
+    assert item["last_status_checked_at"] is not None
+
+
+def test_all_listings_returns_new_datetime_fields_with_null_fallback(client):
+    response = client.get("/internal/v1/hqa/listings?search=RAW-24-UNKNOWN-NULL&page=1&page_size=10&sort_collected=newest")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"]
+    item = payload["items"][0]
+    assert "listing_published_at" in item
+    assert "last_status_checked_at" in item
+    assert item["listing_published_at"] is None
+    assert item["last_status_checked_at"] is None
+
+
 def test_all_listings_filter_options_brand_scopes_models(client):
     response = client.get("/internal/v1/hqa/listings/filter-options?brand=jbl")
     assert response.status_code == 200

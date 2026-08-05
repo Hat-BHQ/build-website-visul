@@ -125,6 +125,8 @@ def _listing_base_select():
         listing_table.c.category_name,
         status_expression.label("listing_status"),
         status_expression.label("status"),
+        listing_table.c.listing_published_at,
+        listing_table.c.last_status_checked_at,
         listing_table.c.listing_location,
         listing_table.c.listing_views,
         func.coalesce(listing_table.c.quantity, listing_table.c["count"], 0).label("quantity"),

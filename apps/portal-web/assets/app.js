@@ -963,7 +963,11 @@ function isAllListingsPriceRangeInvalid(filters) {
 
 function parseNonNegativeNumber(rawValue) {
   if (rawValue === '' || rawValue === null || rawValue === undefined) return { ok: true, value: '' };
-  const normalized = String(rawValue).trim();
+  const candidate = String(rawValue).trim();
+  let normalized = candidate;
+  if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(candidate)) {
+    normalized = candidate.replace(/,/g, '');
+  }
   if (!/^\d+(\.\d+)?$/.test(normalized)) {
     return { ok: false, message: 'Gia tri gia phai la so hop le.' };
   }
@@ -1755,6 +1759,24 @@ function formatPrice(price, currency) {
   return `${Number(price).toLocaleString()} ${escapeHtml(currency || '')}`.trim();
 }
 
+function formatDateTimeHcm(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  if (!map.day || !map.month || !map.year || !map.hour || !map.minute) return '-';
+  return `${map.day}/${map.month}/${map.year} ${map.hour}:${map.minute}`;
+}
+
 function statusClass(status) {
   const normalized = normalizeListingStatus(status).key;
   if (normalized === 'active') return 'status-active';
@@ -1801,6 +1823,8 @@ function listingRow(item, mode = 'report') {
       <td>${formatPrice(item.price, item.currency)}</td>
       <td>${escapeHtml(item.quantity ?? '-')}</td>
       <td><span class="status-pill ${statusClass(normalizedStatus.key)}">${escapeHtml(normalizedStatus.label)}</span></td>
+      <td class="all-listings-datetime">${escapeHtml(formatDateTimeHcm(item.listing_published_at))}</td>
+      <td class="all-listings-datetime">${escapeHtml(formatDateTimeHcm(item.last_status_checked_at))}</td>
     </tr>`;
   }
 
@@ -1875,7 +1899,7 @@ function listingTable(payload, options = {}) {
         <thead>
           <tr>
             ${mode === 'raw'
-              ? '<th>Image</th><th>Marketplace</th><th>Listing</th><th>Category name</th><th>Seller / Shop</th><th>Price</th><th>Quantity</th><th>Status</th>'
+              ? '<th>Image</th><th>Marketplace</th><th>Listing</th><th>Category name</th><th>Seller / Shop</th><th>Price</th><th>Quantity</th><th>Status</th><th>Listing published at</th><th>Last status checked at</th>'
               : '<th>Image</th><th>Marketplace</th><th>Listing</th><th>Category</th><th>Seller / Shop</th><th>Price</th><th>Status</th><th>Research date</th><th>Action</th>'}
           </tr>
         </thead>

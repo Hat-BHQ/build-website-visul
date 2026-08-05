@@ -51,6 +51,8 @@ def _row(
     brand: str | None = None,
     model: str | None = None,
     buying_options: str | None = None,
+    listing_published_at: dt.datetime | None = None,
+    last_status_checked_at: dt.datetime | None = None,
 ):
     return {
         "id": row_id,
@@ -71,6 +73,8 @@ def _row(
         "brand": brand,
         "model": model,
         "buying_options": buying_options,
+        "listing_published_at": listing_published_at,
+        "last_status_checked_at": last_status_checked_at,
         "listing_location": "VN",
         "listing_views": 10,
         "quantity": 1,
@@ -120,6 +124,8 @@ def db_session():
                         brand="Pioneer",
                         model="SX1080",
                         buying_options="FIXED_PRICE",
+                        listing_published_at=dt.datetime(2026, 7, 29, 8, 15, 0),
+                        last_status_checked_at=dt.datetime(2026, 7, 30, 12, 45, 0),
                     ),
                 _row(
                     "2",

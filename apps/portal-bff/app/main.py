@@ -116,7 +116,7 @@ async def hqa_dashboard(request: Request):
 
 @app.get("/api/v1/hqa/listings")
 async def hqa_listings(request: Request):
-    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/listings", request)
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/listings", request)
 
 
 @app.get("/api/v1/hqa/listings/summary")

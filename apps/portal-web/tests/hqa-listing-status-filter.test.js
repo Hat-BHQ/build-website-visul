@@ -42,6 +42,7 @@ assert(source.includes('data-option-retry="${apiField}"'), 'Lazy option retry ma
 assert(source.includes('if (nextFilters.fromDate && nextFilters.toDate && nextFilters.fromDate > nextFilters.toDate)'), 'Date range validation must exist');
 assert(source.includes('parseNonNegativeNumber(nextFilters.minPrice)'), 'Min price validation must exist');
 assert(source.includes('parseNonNegativeNumber(nextFilters.maxPrice)'), 'Max price validation must exist');
+assert(source.includes("candidate.replace(/,/g, '')"), 'Price parser must normalize comma thousand separators');
 assert(source.includes('Min price must be less than or equal to max price.'), 'Price range validation message must exist');
 
 assert(source.includes('await loadAllListingsFilterOptions();'), 'All Listings filter options loader must be used');
@@ -51,6 +52,14 @@ assert(!source.includes('await loadHqaFilterOptions();'), 'Legacy daily-report f
 assert(!source.includes('await loadHqaSummary();'), 'Legacy daily-report summary loader must not be used');
 assert(!source.includes('export-daily-report'), 'Daily report export action must be removed');
 
+assert(source.includes('<th>Listing published at</th><th>Last status checked at</th>'), 'All Listings table must include two datetime headers after status');
+assert(source.includes('formatDateTimeHcm(item.listing_published_at)'), 'All Listings rows must render listing_published_at');
+assert(source.includes('formatDateTimeHcm(item.last_status_checked_at)'), 'All Listings rows must render last_status_checked_at');
+assert(source.includes("timeZone: 'Asia/Ho_Chi_Minh'"), 'Datetime formatter must use Asia/Ho_Chi_Minh timezone');
+assert(source.includes("if (!value) return '-';"), 'Datetime formatter must return - for null/undefined values');
+assert(source.includes("if (Number.isNaN(date.getTime())) return '-';"), 'Datetime formatter must return - for invalid values');
+assert(source.includes('return `${map.day}/${map.month}/${map.year} ${map.hour}:${map.minute}`;'), 'Datetime formatter must output DD/MM/YYYY HH:mm format');
+
 assert(styles.includes('.multi-select {'), 'Multi-select container styles must exist');
 assert(styles.includes('.multi-select-trigger {'), 'Multi-select trigger styles must exist');
 assert(styles.includes('.multi-select-dropdown {'), 'Multi-select menu styles must exist');
@@ -59,6 +68,9 @@ assert(styles.includes('.multi-select-options {'), 'Multi-select option list sty
 assert(styles.includes('.multi-select-search {'), 'Lazy option search styles must exist');
 assert(styles.includes('.multi-select-footer {'), 'Lazy option footer styles must exist');
 assert(styles.includes('.multi-select-option input[type="checkbox"]'), 'Checkbox size override for lazy options must exist');
+assert(styles.includes('.all-listings-table { min-width: 1240px;'), 'All Listings table width must be increased for new datetime columns');
+assert(styles.includes('.all-listings-datetime {'), 'Datetime cell class must exist');
+assert(styles.includes('white-space: nowrap;'), 'Datetime columns must keep single-line values');
 
 assert(source.includes('/hqa/dashboard/filter-options?${'), 'Dashboard must load filter options from new API');
 assert(source.includes('/hqa/dashboard/sellers/summary'), 'Dashboard must use sellers summary API');

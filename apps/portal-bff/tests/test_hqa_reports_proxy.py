@@ -11,6 +11,16 @@ def _param_values(call, key: str):
     return [item_value for item_key, item_value in params if item_key == key]
 
 
+def _first_param(params, key: str, default=None):
+    values = []
+    if isinstance(params, dict):
+        value = params.get(key)
+        values = [] if value is None else [value]
+    else:
+        values = [item_value for item_key, item_value in params if item_key == key]
+    return values[0] if values else default
+
+
 class FakeResponse:
     def __init__(self, status_code: int, payload: dict, text_payload: str | None = None, headers: dict | None = None):
         self.status_code = status_code
@@ -57,6 +67,48 @@ class FakeAsyncClient:
             "json": json,
         }
         FakeAsyncClient.calls.append(payload)
+        if url.endswith("/internal/v1/hqa/listings"):
+            conditions = _param_values(payload, "condition")
+            statuses = _param_values(payload, "status")
+            category_names = _param_values(payload, "category_name")
+            buying_options = _param_values(payload, "buying_option")
+            return FakeResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "marketplace": "ebay",
+                            "brand": "JBL",
+                            "model": "120TI",
+                            "condition": conditions[0] if conditions else "Excellent",
+                            "listing_status": statuses[0] if statuses else "active",
+                            "price": 1000,
+                            "listing_id": "JBL-120TI-ONLY",
+                            "listing_published_at": "2026-07-29T08:15:00",
+                            "last_status_checked_at": "2026-07-30T12:45:00",
+                        }
+                    ],
+                    "page": 1,
+                    "page_size": 20,
+                    "total": 1,
+                    "total_pages": 1,
+                    "applied_filters": {
+                        "from_date": _first_param(params_payload, "from_date"),
+                        "to_date": _first_param(params_payload, "to_date"),
+                        "marketplace": _first_param(params_payload, "marketplace"),
+                        "brand": _first_param(params_payload, "brand"),
+                        "model": _first_param(params_payload, "model"),
+                        "condition": conditions,
+                        "status": statuses,
+                        "category_name": category_names,
+                        "buying_option": buying_options,
+                        "min_price": float(_first_param(params_payload, "min_price", 0)) if _first_param(params_payload, "min_price") is not None else None,
+                        "max_price": float(_first_param(params_payload, "max_price", 0)) if _first_param(params_payload, "max_price") is not None else None,
+                        "sort_collected": _first_param(params_payload, "sort_collected"),
+                        "search": _first_param(params_payload, "search"),
+                    },
+                },
+            )
         if "export-csv" in url or url.endswith("/export"):
             return FakeResponse(
                 200,
@@ -159,7 +211,7 @@ def test_all_listings_new_routes_forward_to_hqa(monkeypatch):
     assert summary_response.status_code == 200
     assert options_response.status_code == 200
     urls = [call["url"] for call in FakeAsyncClient.calls]
-    assert "http://hqa-service:8000/internal/v1/listings" in urls
+    assert "http://hqa-service:8000/internal/v1/hqa/listings" in urls
     assert "http://hqa-service:8000/internal/v1/hqa/listings/summary" in urls
     assert "http://hqa-service:8000/internal/v1/hqa/listings/filter-options" in urls
     options_call = next(call for call in FakeAsyncClient.calls if call["url"].endswith("/internal/v1/hqa/listings/filter-options"))
@@ -167,6 +219,74 @@ def test_all_listings_new_routes_forward_to_hqa(monkeypatch):
     assert ("condition", "used") in options_call["params"]
     assert ("status", "active") in options_call["params"]
     assert ("status", "ended") in options_call["params"]
+
+
+def test_hqa_listings_proxy_keeps_new_datetime_fields(monkeypatch):
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    FakeAsyncClient.calls = []
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/hqa/listings?page=1&page_size=20",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"]
+    item = payload["items"][0]
+    assert item["listing_published_at"] == "2026-07-29T08:15:00"
+    assert item["last_status_checked_at"] == "2026-07-30T12:45:00"
+
+
+def test_hqa_listings_proxy_relays_full_all_listings_filters_and_applied_filters(monkeypatch):
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    FakeAsyncClient.calls = []
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/hqa/listings"
+            "?marketplace=ebay"
+            "&brand=JBL"
+            "&model=120TI"
+            "&condition=Excellent"
+            "&condition=EXCELLENT%20(COPY)"
+            "&status=active"
+            "&min_price=10"
+            "&max_price=100000"
+            "&sort_collected=oldest"
+            "&page=1"
+            "&page_size=50",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+    assert response.status_code == 200
+    listings_call = next(call for call in FakeAsyncClient.calls if call["url"].endswith("/internal/v1/hqa/listings"))
+    assert _param_values(listings_call, "marketplace") == ["ebay"]
+    assert _param_values(listings_call, "brand") == ["JBL"]
+    assert _param_values(listings_call, "model") == ["120TI"]
+    assert _param_values(listings_call, "condition") == ["Excellent", "EXCELLENT (COPY)"]
+    assert _param_values(listings_call, "status") == ["active"]
+    assert _param_values(listings_call, "min_price") == ["10"]
+    assert _param_values(listings_call, "max_price") == ["100000"]
+    assert _param_values(listings_call, "sort_collected") == ["oldest"]
+
+    payload = response.json()
+    assert payload["applied_filters"]["marketplace"] == "ebay"
+    assert payload["applied_filters"]["brand"] == "JBL"
+    assert payload["applied_filters"]["model"] == "120TI"
+    assert payload["applied_filters"]["condition"] == ["Excellent", "EXCELLENT (COPY)"]
+    assert payload["applied_filters"]["status"] == ["active"]
+    assert payload["applied_filters"]["min_price"] == 10.0
+    assert payload["applied_filters"]["max_price"] == 100000.0
+    assert payload["applied_filters"]["sort_collected"] == "oldest"
+    assert len(payload["items"]) == 1
+    only_item = payload["items"][0]
+    assert only_item["marketplace"] == "ebay"
+    assert only_item["brand"] == "JBL"
+    assert only_item["model"] == "120TI"
+    assert only_item["listing_status"] == "active"
+    assert 10 <= only_item["price"] <= 100000
 
 
 def test_all_listings_filter_options_field_mode_forwards_pagination_query(monkeypatch):

@@ -29,6 +29,8 @@ marketplace_research_results = Table(
     Column("category", Text, nullable=True),
     Column("category_name", Text, nullable=True),
     Column("buying_options", Text, nullable=True),
+    Column("listing_published_at", DateTime, nullable=True),
+    Column("last_status_checked_at", DateTime, nullable=True),
     Column("research_date", Date, nullable=True),
     Column("collected_at", DateTime, nullable=True),
     Column("updated_at", DateTime, nullable=True, index=True),
