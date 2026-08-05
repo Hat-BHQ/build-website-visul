@@ -3,72 +3,69 @@ const path = require('path');
 const assert = require('assert');
 
 const appJsPath = path.join(__dirname, '..', 'assets', 'app.js');
+const stylesCssPath = path.join(__dirname, '..', 'assets', 'styles.css');
 const source = fs.readFileSync(appJsPath, 'utf8');
+const styles = fs.readFileSync(stylesCssPath, 'utf8');
 
-const expectedOptions = [
-  { value: '', label: 'All statuses' },
-  { value: 'active', label: 'ACTIVE' },
-  { value: 'ended', label: 'ENDED' },
-  { value: 'new_listing', label: 'NEW_LISTING' },
-  { value: 'out_of_stock', label: 'OUT_OF_STOCK' },
-  { value: 'unknown', label: 'UNKNOWN' },
-];
+assert(source.includes("const HQA_MAIN_TABS = ["), 'HQA tabs list must exist');
+assert(source.includes("{ key: 'all_listings', label: 'All Listings' }"), 'All Listings tab must exist');
+assert(source.includes("{ key: 'dashboard', label: 'Dashboard' }"), 'Dashboard tab must exist');
+assert(!source.includes("{ key: 'daily_report', label: 'Daily Report' }"), 'Daily Report tab must be removed from main tabs');
+assert(!source.includes('/hqa/reports/marketplace/listings?${'), 'All Listings flow must not call Daily Report listings endpoint');
+assert(!source.includes('/hqa/reports/marketplace/summary?${'), 'All Listings flow must not call Daily Report summary endpoint');
+assert(source.includes('Quan ly, loc va xuat toan bo du lieu marketplace listings.'), 'Subtitle must be updated');
 
-for (const option of expectedOptions) {
-  assert(
-    source.includes(`<option value="${option.value}"`) && source.includes(`>${option.label}</option>`),
-    `Missing listing_status option ${option.label}`,
-  );
-}
+assert(source.includes('appendArrayParams(params, \"condition\", filters.conditions)') || source.includes("appendArrayParams(params, 'condition', filters.conditions)"), 'Conditions must be encoded as repeated query params');
+assert(source.includes('appendArrayParams(params, \"status\", filters.statuses)') || source.includes("appendArrayParams(params, 'status', filters.statuses)"), 'Statuses must be encoded as repeated query params');
+assert(source.includes('appendArrayParams(params, \"category_name\", filters.categoryNames)') || source.includes("appendArrayParams(params, 'category_name', filters.categoryNames)"), 'Category names must be encoded as repeated query params');
+assert(source.includes('appendArrayParams(params, \"buying_option\", filters.buyingOptions)') || source.includes("appendArrayParams(params, 'buying_option', filters.buyingOptions)"), 'Buying options must be encoded as repeated query params');
+assert(source.includes("if (filters.minPrice !== '') params.set('min_price', String(filters.minPrice).trim());"), 'min_price must be included in All Listings params');
+assert(source.includes("if (filters.maxPrice !== '') params.set('max_price', String(filters.maxPrice).trim());"), 'max_price must be included in All Listings params');
+assert(source.includes("if (filters.marketplace) params.set('marketplace', filters.marketplace);"), 'marketplace must be included in All Listings params');
 
-assert(!source.includes('OUT_OG_STOCK'), 'Invalid status OUT_OG_STOCK must not exist');
+assert(source.includes('function cloneAllListingsFilters(filters)'), 'All Listings filter cloning helper must exist');
+assert(source.includes('conditions: [...(filters.conditions || [])]'), 'Filter cloning must deep-copy conditions');
+assert(source.includes('statuses: [...(filters.statuses || [])]'), 'Filter cloning must deep-copy statuses');
+assert(source.includes('categoryNames: [...(filters.categoryNames || [])]'), 'Filter cloning must deep-copy category names');
+assert(source.includes('buyingOptions: [...(filters.buyingOptions || [])]'), 'Filter cloning must deep-copy buying options');
 
-assert(
-  source.includes("listing_status: document.getElementById('listing-status').value.trim()"),
-  'Apply filters must persist selected listing_status',
-);
+assert(source.includes('function renderAllListingsLazySelect('), 'Lazy multi-select renderer must exist');
+assert(source.includes('data-lazy-filter-trigger="${apiField}"'), 'Lazy filter trigger markup must exist');
+assert(source.includes('data-option-field="${apiField}"'), 'Lazy option field markup must exist');
+assert(source.includes('data-option-value="${escapeHtml(item.value)}"'), 'Lazy option value markup must exist');
+assert(source.includes('data-option-select-all="${apiField}"'), 'Lazy option select-all markup must exist');
+assert(source.includes('data-option-clear="${apiField}"'), 'Lazy option clear markup must exist');
+assert(source.includes('data-option-search-input="${fieldKey}"'), 'Lazy option search input markup must exist');
+assert(source.includes('data-option-load-more="${apiField}"'), 'Lazy option load-more markup must exist');
+assert(source.includes('data-option-retry="${apiField}"'), 'Lazy option retry markup must exist');
 
-assert(
-  source.includes("listing_status: ''"),
-  'Reset filters must clear listing_status back to All statuses',
-);
+assert(source.includes('if (nextFilters.fromDate && nextFilters.toDate && nextFilters.fromDate > nextFilters.toDate)'), 'Date range validation must exist');
+assert(source.includes('parseNonNegativeNumber(nextFilters.minPrice)'), 'Min price validation must exist');
+assert(source.includes('parseNonNegativeNumber(nextFilters.maxPrice)'), 'Max price validation must exist');
+assert(source.includes('Min price must be less than or equal to max price.'), 'Price range validation message must exist');
 
-assert(
-  source.includes("if (filters[key]) params.set(key, filters[key]);"),
-  'Query builder must skip empty listing_status when All statuses is selected',
-);
+assert(source.includes('await loadAllListingsFilterOptions();'), 'All Listings filter options loader must be used');
+assert(source.includes('await loadAllListingsSummary();'), 'All Listings summary loader must be used');
+assert(source.includes('await loadActiveListings();'), 'All Listings loader must be used');
+assert(!source.includes('await loadHqaFilterOptions();'), 'Legacy daily-report filter loader must not be used');
+assert(!source.includes('await loadHqaSummary();'), 'Legacy daily-report summary loader must not be used');
+assert(!source.includes('export-daily-report'), 'Daily report export action must be removed');
 
-const requiredDynamicSelects = [
-  "buildFilterOptionSelect('brand', 'All brands', 'brands')",
-  "buildFilterOptionSelect('model', 'All models', 'models')",
-  "buildFilterOptionSelect('category', 'All categories', 'categories')",
-  "buildFilterOptionSelect('listing_location', 'All locations', 'listing_locations')",
-  "buildFilterOptionSelect('condition', 'All conditions', 'conditions')",
-  "buildFilterOptionSelect('category_name', 'All category names', 'category_names')",
-  "buildFilterOptionSelect('buying_options', 'All buying options', 'buying_options')",
-];
+assert(styles.includes('.multi-select {'), 'Multi-select container styles must exist');
+assert(styles.includes('.multi-select-trigger {'), 'Multi-select trigger styles must exist');
+assert(styles.includes('.multi-select-dropdown {'), 'Multi-select menu styles must exist');
+assert(styles.includes('.multi-select-actions {'), 'Multi-select actions styles must exist');
+assert(styles.includes('.multi-select-options {'), 'Multi-select option list styles must exist');
+assert(styles.includes('.multi-select-search {'), 'Lazy option search styles must exist');
+assert(styles.includes('.multi-select-footer {'), 'Lazy option footer styles must exist');
+assert(styles.includes('.multi-select-option input[type="checkbox"]'), 'Checkbox size override for lazy options must exist');
 
-for (const marker of requiredDynamicSelects) {
-  assert(source.includes(marker), `Missing dynamic dropdown marker: ${marker}`);
-}
-
-assert(!source.includes('placeholder="Original category"'), 'Original category must be select, not text input');
-assert(!source.includes('placeholder="Condition"'), 'Condition must be select, not text input');
-assert(!source.includes('placeholder="Category name"'), 'Category name must be select, not text input');
-
-assert(
-  source.includes("/hqa/reports/marketplace/filter-options?"),
-  'Filter options must load from backend filter-options API',
-);
-
-assert(
-  source.includes("state.hqa.appliedFilters = { ...state.hqa.draftFilters }"),
-  'Apply filters must copy draft filters into applied filters',
-);
-
-assert(
-  source.includes("state.hqa.appliedFilters = { ...resetFilters }"),
-  'Reset filters must reset applied filters to defaults',
-);
+assert(source.includes('/hqa/dashboard/filter-options?${'), 'Dashboard must load filter options from new API');
+assert(source.includes('/hqa/dashboard/sellers/summary'), 'Dashboard must use sellers summary API');
+assert(source.includes('/hqa/dashboard/prices/summary'), 'Dashboard must use prices summary API');
+assert(source.includes('/hqa/dashboard/alerts'), 'Dashboard must use alerts API');
+assert(source.includes('/hqa/dashboard/export?${'), 'Dashboard export must use new API');
+assert(source.includes('appliedSellerFilters'), 'Dashboard state must separate seller filters');
+assert(source.includes('appliedPriceFilters'), 'Dashboard state must separate price filters');
 
 console.log('hqa-listing-status-filter tests passed');

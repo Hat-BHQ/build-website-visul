@@ -209,6 +209,8 @@ def test_summary_counts(client):
     response = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}")
     assert response.status_code == 200
     payload = response.json()
+    assert payload["database_total_rows"] == 26
+    assert payload["database_unique_listings"] == 26
     assert payload["total_listings_on_date"] == 13
     assert payload["total_new_today"] == 6
     assert payload["total_ended"] == 3
@@ -507,7 +509,104 @@ def test_raw_listings_sort(client):
 def test_summary_total_listings_on_date_with_summary_filters(client):
     response = client.get("/internal/v1/reports/marketplace/summary?report_date=2026-07-23&marketplace=reverb&q=reference")
     assert response.status_code == 200
-    assert response.json()["total_listings_on_date"] == 1
+    payload = response.json()
+    assert payload["database_total_rows"] == 26
+    assert payload["database_unique_listings"] == 26
+    assert payload["total_listings_on_date"] == 1
+
+
+def test_summary_database_totals_count_unique_ids_once_and_skip_blank_listing_ids(client, db_session):
+    baseline = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}").json()
+
+    db_session.execute(
+        marketplace_research_results.insert(),
+        [
+            {
+                "id": "9001",
+                "research_date": REPORT_DATE,
+                "collected_at": dt.datetime(2026, 7, 30, 11, 0, 0),
+                "marketplace": "ebay",
+                "listing_id": "DUP-SUMMARY-1",
+                "listing_title": "Duplicate summary row 1",
+                "listing_url": None,
+                "image_url": None,
+                "seller_or_shop": "Summary Seller",
+                "price": 10,
+                "currency": "USD",
+                "condition": "used",
+                "category": "speaker",
+                "category_name": "Vintage Speakers",
+                "listing_status": "active",
+                "listing_location": "US",
+                "listing_views": 1,
+                "quantity": 1,
+                "count": None,
+                "updated_at": dt.datetime(2026, 7, 30, 12, 0, 0),
+                "shipping_price": None,
+                "total_price": None,
+                "exclude_flag": False,
+            },
+            {
+                "id": "9002",
+                "research_date": REPORT_DATE,
+                "collected_at": dt.datetime(2026, 7, 30, 11, 5, 0),
+                "marketplace": "ebay",
+                "listing_id": "DUP-SUMMARY-1",
+                "listing_title": "Duplicate summary row 2",
+                "listing_url": None,
+                "image_url": None,
+                "seller_or_shop": "Summary Seller",
+                "price": 11,
+                "currency": "USD",
+                "condition": "used",
+                "category": "speaker",
+                "category_name": "Vintage Speakers",
+                "listing_status": "active",
+                "listing_location": "US",
+                "listing_views": 1,
+                "quantity": 1,
+                "count": None,
+                "updated_at": dt.datetime(2026, 7, 30, 12, 0, 0),
+                "shipping_price": None,
+                "total_price": None,
+                "exclude_flag": False,
+            },
+            {
+                "id": "9003",
+                "research_date": REPORT_DATE,
+                "collected_at": dt.datetime(2026, 7, 30, 11, 10, 0),
+                "marketplace": "ebay",
+                "listing_id": "   ",
+                "listing_title": "Blank listing id row",
+                "listing_url": None,
+                "image_url": None,
+                "seller_or_shop": "Summary Seller",
+                "price": 12,
+                "currency": "USD",
+                "condition": "used",
+                "category": "speaker",
+                "category_name": "Vintage Speakers",
+                "listing_status": "active",
+                "listing_location": "US",
+                "listing_views": 1,
+                "quantity": 1,
+                "count": None,
+                "updated_at": dt.datetime(2026, 7, 30, 12, 0, 0),
+                "shipping_price": None,
+                "total_price": None,
+                "exclude_flag": False,
+            },
+        ],
+    )
+    db_session.commit()
+
+    response = client.get(f"/internal/v1/reports/marketplace/summary?report_date={REPORT_DATE.isoformat()}")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["database_total_rows"] == baseline["database_total_rows"] + 3
+    assert payload["database_unique_listings"] == baseline["database_unique_listings"] + 1
+    assert payload["total_listings_on_date"] == baseline["total_listings_on_date"] + 3
 
 
 def test_raw_listings_no_database_write(client, db_session):
@@ -550,6 +649,62 @@ def test_filter_options_returns_200(client):
     payload = response.json()
     assert payload["view"] == "all_listings"
     assert "options" in payload
+
+
+def test_filter_options_all_listings_without_report_date_returns_200(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?view=all_listings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["report_date"] is None
+    assert payload["report_date_key"] == "all_dates"
+    assert payload["cache_key"][2] == "all_dates"
+    assert payload["options"]["brands"]["items"]
+
+
+def test_filter_options_all_listings_without_report_date_spans_multiple_dates(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?view=all_listings")
+    assert response.status_code == 200
+    brands = {item["value"] for item in response.json()["options"]["brands"]["items"]}
+    assert "jbl" in brands
+    assert "testbrand" in brands
+
+
+def test_filter_options_all_listings_without_report_date_does_not_filter_research_date_is_null(client, db_session):
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        response = client.get("/internal/v1/reports/marketplace/filter-options?view=all_listings")
+        assert response.status_code == 200
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    assert all("research_date is null" not in statement for statement in statements)
+
+
+def test_filter_options_all_listings_with_report_date_limits_to_date(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?view=all_listings&report_date=2026-07-23")
+    assert response.status_code == 200
+    brands = {item["value"] for item in response.json()["options"]["brands"]["items"]}
+    assert "jbl" in brands
+    assert "testbrand" not in brands
+
+
+def test_filter_options_report_view_without_report_date_returns_422(client):
+    response = client.get("/internal/v1/reports/marketplace/filter-options?view=report&report_key=main_repeated")
+    assert response.status_code == 422
+    assert "report_date is required for report view" in response.json()["detail"]
+
+
+def test_filter_options_report_view_with_report_date_still_works(client):
+    response = client.get(
+        f"/internal/v1/reports/marketplace/filter-options?view=report&report_key=main_repeated&report_date={REPORT_DATE.isoformat()}"
+    )
+    assert response.status_code == 200
+    assert response.json()["report_date_key"] == REPORT_DATE.isoformat()
 
 
 def test_filter_options_buying_options_no_grouping_error(client):
@@ -730,3 +885,277 @@ def test_filter_options_request_does_not_call_network(client, monkeypatch):
     monkeypatch.setattr(socket, "create_connection", blocked_connect)
     response = client.get("/internal/v1/reports/marketplace/filter-options?report_date=2026-07-23&view=all_listings")
     assert response.status_code == 200
+
+
+def test_dashboard_summary_endpoint(client):
+    response = client.get("/internal/v1/reports/marketplace/dashboard/summary?date_from=2026-07-01&date_to=2026-08-31")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_listings"] >= 1
+    assert payload["unique_listings"] >= 1
+    assert "avg_price" in payload
+    assert "active" in payload
+
+
+def test_dashboard_trend_endpoints(client):
+    price_response = client.get("/internal/v1/reports/marketplace/dashboard/price-trend?date_from=2026-07-01&date_to=2026-08-31")
+    seller_response = client.get("/internal/v1/reports/marketplace/dashboard/seller-trend?date_from=2026-07-01&date_to=2026-08-31")
+    status_response = client.get("/internal/v1/reports/marketplace/dashboard/status-trend?date_from=2026-07-01&date_to=2026-08-31")
+    keyword_response = client.get("/internal/v1/reports/marketplace/dashboard/keyword-summary?date_from=2026-07-01&date_to=2026-08-31")
+    alerts_response = client.get("/internal/v1/reports/marketplace/dashboard/alerts?date_from=2026-07-01&date_to=2026-08-31")
+
+    assert price_response.status_code == 200
+    assert seller_response.status_code == 200
+    assert status_response.status_code == 200
+    assert keyword_response.status_code == 200
+    assert alerts_response.status_code == 200
+    assert isinstance(price_response.json().get("points"), list)
+    assert isinstance(seller_response.json().get("points"), list)
+    assert isinstance(status_response.json().get("points"), list)
+    assert isinstance(keyword_response.json().get("items"), list)
+    assert isinstance(alerts_response.json().get("alerts"), list)
+
+
+def test_raw_and_report_export_csv_endpoints(client):
+    raw_response = client.get("/internal/v1/reports/marketplace/raw-listings/export-csv?report_date=2026-07-23")
+    report_response = client.get(
+        f"/internal/v1/reports/marketplace/listings/export-csv?report_key=main_repeated&report_date={REPORT_DATE.isoformat()}"
+    )
+
+    assert raw_response.status_code == 200
+    assert report_response.status_code == 200
+    assert raw_response.headers["content-type"].startswith("text/csv")
+    assert report_response.headers["content-type"].startswith("text/csv")
+    assert "listing_id" in raw_response.text
+    assert "listing_id" in report_response.text
+
+
+def test_dashboard_export_csv_endpoint(client):
+    response = client.get("/internal/v1/reports/marketplace/dashboard/export-csv?dataset=summary")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "total_listings" in response.text
+
+
+def test_all_listings_new_endpoint_returns_paginated_rows(client):
+    response = client.get("/internal/v1/hqa/listings?page=1&page_size=10&sort_collected=newest")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["page"] == 1
+    assert payload["page_size"] == 10
+    assert "items" in payload
+    assert "total" in payload
+
+
+def test_all_listings_filter_options_brand_scopes_models(client):
+    response = client.get("/internal/v1/hqa/listings/filter-options?brand=jbl")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "marketplaces" in payload
+    assert "brands" in payload
+    assert "models" in payload
+    assert isinstance(payload["models"], list)
+
+
+def test_all_listings_filter_options_field_mode_rejects_invalid_field(client):
+    response = client.get("/internal/v1/hqa/listings/filter-options?field=invalid_field&page=1&page_size=20")
+    assert response.status_code == 400
+    assert "Invalid field" in response.json()["detail"]
+
+
+def test_all_listings_filter_options_field_mode_rejects_page_size_over_limit(client):
+    response = client.get("/internal/v1/hqa/listings/filter-options?field=brand&page=1&page_size=101")
+    assert response.status_code == 422
+
+
+def test_all_listings_filter_options_field_mode_pagination_has_more(client):
+    response = client.get("/internal/v1/hqa/listings/filter-options?field=brand&page=1&page_size=1")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["field"] == "brand"
+    assert payload["page"] == 1
+    assert payload["page_size"] == 1
+    assert isinstance(payload["items"], list)
+    assert len(payload["items"]) <= 1
+    assert isinstance(payload["has_more"], bool)
+
+
+def test_all_listings_filter_options_field_mode_model_scoped_by_brand(client):
+    response = client.get("/internal/v1/hqa/listings/filter-options?field=model&brand=jbl&page=1&page_size=20")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["field"] == "model"
+    model_values = {item["value"].lower() for item in payload["items"]}
+    assert model_values == {"l100"}
+
+
+def test_all_listings_filter_options_field_mode_search_and_normalization(client):
+    response = client.get("/internal/v1/hqa/listings/filter-options?field=buying_option&search= fixed &page=1&page_size=20")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["field"] == "buying_option"
+    values = [item["value"] for item in payload["items"]]
+    assert all(value.strip() for value in values)
+    assert len(values) == len({value.lower() for value in values})
+    assert all("fixed" in value.lower() for value in values)
+
+
+def test_all_listings_accepts_multi_value_filters(client):
+    response = client.get(
+        "/internal/v1/hqa/listings?condition=used&condition=new&status=active&status=ended&category_name=vintage%20speakers&buying_option=fixed_price&page=1&page_size=20"
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["items"], list)
+    assert payload["applied_filters"]["condition"] == ["used", "new"]
+    assert payload["applied_filters"]["status"] == ["active", "ended"]
+    assert payload["applied_filters"]["category_name"] == ["vintage speakers"]
+    assert payload["applied_filters"]["buying_option"] == ["fixed_price"]
+
+
+def test_all_listings_supports_marketplace_and_price_range_filters(client):
+    response = client.get("/internal/v1/hqa/listings?marketplace=ebay&min_price=500&max_price=2500&page=1&page_size=20")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["applied_filters"]["marketplace"] == "ebay"
+    assert payload["applied_filters"]["min_price"] == 500.0
+    assert payload["applied_filters"]["max_price"] == 2500.0
+
+
+def test_all_listings_summary_and_export(client):
+    summary = client.get("/internal/v1/hqa/listings/summary?brand=jbl")
+    export = client.get("/internal/v1/hqa/listings/export?brand=jbl&sort_collected=newest")
+
+    assert summary.status_code == 200
+    summary_payload = summary.json()
+    assert "total_records_stored" in summary_payload
+    assert "filtered_records" in summary_payload
+    assert "active" in summary_payload
+
+    assert export.status_code == 200
+    assert export.headers["content-type"].startswith("text/csv")
+    assert export.text.startswith("\ufeff")
+    assert "listing_id" in export.text
+
+
+def test_all_listings_summary_and_export_share_multi_filters(client):
+    query = "marketplace=ebay&condition=used&condition=new&status=active&status=ended&min_price=100&max_price=5000&search=pioneer"
+    summary = client.get(f"/internal/v1/hqa/listings/summary?{query}")
+    export = client.get(f"/internal/v1/hqa/listings/export?{query}&sort_collected=newest")
+
+    assert summary.status_code == 200
+    assert export.status_code in (200, 404)
+    if export.status_code == 200:
+        assert export.headers["content-type"].startswith("text/csv")
+        assert "listing_id" in export.text
+
+
+def test_all_listings_rejects_invalid_price_range(client):
+    response = client.get("/internal/v1/hqa/listings?min_price=3000&max_price=1000")
+    assert response.status_code == 400
+    assert "min_price must be <= max_price" in response.json()["detail"]
+
+
+def test_all_listings_export_returns_404_when_no_data(client):
+    response = client.get("/internal/v1/hqa/listings/export?from_date=1990-01-01&to_date=1990-01-02")
+    assert response.status_code == 404
+
+
+def test_hqa_dashboard_filter_options_returns_db_driven_options(client):
+    response = client.get("/internal/v1/hqa/dashboard/filter-options?date_from=2026-07-01&date_to=2026-08-31")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "options" in payload
+    assert payload["options"]["marketplaces"]
+    assert payload["options"]["brands"]
+    assert payload["options"]["sellers"]
+
+
+def test_hqa_dashboard_seller_analytics_endpoints(client):
+    summary_response = client.get("/internal/v1/hqa/dashboard/sellers/summary?date_from=2026-07-01&date_to=2026-08-31")
+    trend_response = client.get("/internal/v1/hqa/dashboard/sellers/trend?date_from=2026-07-01&date_to=2026-08-31&granularity=month")
+    top_response = client.get("/internal/v1/hqa/dashboard/sellers/top?date_from=2026-07-01&date_to=2026-08-31&limit=5")
+
+    assert summary_response.status_code == 200
+    assert trend_response.status_code == 200
+    assert top_response.status_code == 200
+
+    summary = summary_response.json()
+    assert "total_sellers" in summary
+    assert "new_sellers" in summary
+    assert "total_listings" in summary
+
+    trend = trend_response.json()
+    assert trend["granularity"] == "month"
+    assert isinstance(trend["points"], list)
+
+    top = top_response.json()
+    assert isinstance(top["items"], list)
+
+
+def test_hqa_dashboard_price_analytics_endpoints(client):
+    summary_response = client.get(
+        "/internal/v1/hqa/dashboard/prices/summary?date_from=2026-07-01&date_to=2026-08-31&min_price=100&max_price=5000"
+    )
+    trend_response = client.get(
+        "/internal/v1/hqa/dashboard/prices/trend?date_from=2026-07-01&date_to=2026-08-31&granularity=week"
+    )
+    by_keyword_response = client.get(
+        "/internal/v1/hqa/dashboard/prices/by-keyword?date_from=2026-07-01&date_to=2026-08-31&limit=10"
+    )
+
+    assert summary_response.status_code == 200
+    assert trend_response.status_code == 200
+    assert by_keyword_response.status_code == 200
+
+    summary = summary_response.json()
+    assert "avg_price" in summary
+    assert "median_price" in summary
+    assert "sample_size" in summary
+
+    trend = trend_response.json()
+    assert trend["granularity"] == "week"
+    assert isinstance(trend["points"], list)
+
+    by_keyword = by_keyword_response.json()
+    assert isinstance(by_keyword["items"], list)
+    assert "total_hits" in by_keyword
+
+
+def test_hqa_dashboard_alerts_endpoint_uses_threshold_logic(client):
+    response = client.get("/internal/v1/hqa/dashboard/alerts?date_from=2026-07-01&date_to=2026-08-31")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "alerts" in payload
+    assert "trend_points" in payload
+    assert isinstance(payload["alerts"], list)
+
+
+def test_hqa_dashboard_endpoints_accept_multi_value_filters(client):
+    response = client.get(
+        "/internal/v1/hqa/dashboard/prices/trend?marketplace=ebay&marketplace=reverb&brand=jbl&status=active&status=ended&granularity=month"
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["granularity"] == "month"
+
+
+def test_hqa_dashboard_export_dataset_routes(client):
+    response = client.get(
+        "/internal/v1/hqa/dashboard/export?dataset=prices_trend&granularity=month&date_from=2026-07-01&date_to=2026-08-31"
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+
+
+def test_hqa_dashboard_export_returns_404_when_no_rows(client):
+    response = client.get(
+        "/internal/v1/hqa/dashboard/export?dataset=prices_by_keyword&date_from=1990-01-01&date_to=1990-01-02"
+    )
+    assert response.status_code == 404
+
+
+def test_hqa_dashboard_rejects_invalid_granularity(client):
+    response = client.get("/internal/v1/hqa/dashboard/prices/trend?granularity=quarter")
+    assert response.status_code == 400
+    assert "granularity must be one of" in response.json()["detail"]

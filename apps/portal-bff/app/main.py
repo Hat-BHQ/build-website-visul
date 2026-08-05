@@ -41,6 +41,12 @@ async def relay(method: str, url: str, request: Request, json_data=None):
         except Exception:
             detail = response.text
         raise HTTPException(status_code=response.status_code, detail=detail)
+    content_type = response.headers.get("content-type", "")
+    if "text/csv" in content_type:
+        headers = {}
+        if response.headers.get("content-disposition"):
+            headers["Content-Disposition"] = response.headers["content-disposition"]
+        return Response(content=response.text, media_type="text/csv", headers=headers)
     if response.status_code == 204:
         return None
     return response.json()
@@ -113,6 +119,66 @@ async def hqa_listings(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/listings", request)
 
 
+@app.get("/api/v1/hqa/listings/summary")
+async def hqa_all_listings_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/listings/summary", request)
+
+
+@app.get("/api/v1/hqa/listings/filter-options")
+async def hqa_all_listings_filter_options(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/listings/filter-options", request)
+
+
+@app.get("/api/v1/hqa/listings/export")
+async def hqa_all_listings_export(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/listings/export", request)
+
+
+@app.get("/api/v1/hqa/dashboard/filter-options")
+async def hqa_dashboard_filter_options(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/filter-options", request)
+
+
+@app.get("/api/v1/hqa/dashboard/sellers/summary")
+async def hqa_dashboard_sellers_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/sellers/summary", request)
+
+
+@app.get("/api/v1/hqa/dashboard/sellers/trend")
+async def hqa_dashboard_sellers_trend(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/sellers/trend", request)
+
+
+@app.get("/api/v1/hqa/dashboard/sellers/top")
+async def hqa_dashboard_sellers_top(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/sellers/top", request)
+
+
+@app.get("/api/v1/hqa/dashboard/prices/summary")
+async def hqa_dashboard_prices_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/prices/summary", request)
+
+
+@app.get("/api/v1/hqa/dashboard/prices/trend")
+async def hqa_dashboard_prices_trend(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/prices/trend", request)
+
+
+@app.get("/api/v1/hqa/dashboard/prices/by-keyword")
+async def hqa_dashboard_prices_by_keyword(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/prices/by-keyword", request)
+
+
+@app.get("/api/v1/hqa/dashboard/alerts")
+async def hqa_dashboard_alerts(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/alerts", request)
+
+
+@app.get("/api/v1/hqa/dashboard/export")
+async def hqa_dashboard_export(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/export", request)
+
+
 @app.get("/api/v1/hqa/listings/{listing_id}")
 async def hqa_listing_detail(listing_id: str, request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/listings/{listing_id}", request)
@@ -136,6 +202,51 @@ async def hqa_marketplace_raw_listings(request: Request):
 @app.get("/api/v1/hqa/reports/marketplace/filter-options")
 async def hqa_marketplace_filter_options(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/filter-options", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/raw-listings/export-csv")
+async def hqa_marketplace_raw_listings_export_csv(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/raw-listings/export-csv", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/listings/export-csv")
+async def hqa_marketplace_report_listings_export_csv(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/listings/export-csv", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/summary")
+async def hqa_marketplace_dashboard_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/summary", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/price-trend")
+async def hqa_marketplace_dashboard_price_trend(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/price-trend", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/seller-trend")
+async def hqa_marketplace_dashboard_seller_trend(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/seller-trend", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/status-trend")
+async def hqa_marketplace_dashboard_status_trend(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/status-trend", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/keyword-summary")
+async def hqa_marketplace_dashboard_keyword_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/keyword-summary", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/alerts")
+async def hqa_marketplace_dashboard_alerts(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/alerts", request)
+
+
+@app.get("/api/v1/hqa/reports/marketplace/dashboard/export-csv")
+async def hqa_marketplace_dashboard_export_csv(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/reports/marketplace/dashboard/export-csv", request)
 
 
 @app.post("/api/v1/sync/jobs", status_code=202)
