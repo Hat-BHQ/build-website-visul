@@ -387,6 +387,47 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 .dashboard-alerts { margin: 0; padding-left: 20px; color: #475467; }
 .dashboard-alerts li { margin-bottom: 8px; }
 
+.data-check-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.data-check-table { min-width: 1120px; }
+.data-check-detail-table-wrap { margin-top: 8px; }
+.data-check-detail-table { min-width: 1240px; }
+.data-check-pager { margin-top: 12px; justify-content: space-between; }
+.data-check-keep-pill,
+.data-check-delete-pill {
+	display: inline-flex;
+	padding: 4px 8px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 700;
+}
+.data-check-keep-pill { background: #dcfce7; color: #166534; }
+.data-check-delete-pill { background: #fee2e2; color: #991b1b; }
+
+.data-check-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	background: rgba(15, 23, 42, 0.42);
+	display: grid;
+	place-items: center;
+	z-index: 1200;
+	padding: 16px;
+}
+
+.data-check-modal {
+	width: min(520px, calc(100vw - 24px));
+	background: #ffffff;
+	border-radius: 14px;
+	border: 1px solid #dbe4f0;
+	padding: 18px;
+	box-shadow: 0 20px 60px rgba(15, 23, 42, 0.24);
+	display: grid;
+	gap: 10px;
+}
+
+.data-check-modal h3 { margin: 0; }
+.data-check-modal p { margin: 0; color: #475467; }
+.data-check-modal-actions { justify-content: flex-end; margin-top: 6px; }
+
 @media (max-width: 1000px) {
 	.hqa-filter-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
 	.filter-field--search { grid-column: span 2; }
@@ -394,6 +435,7 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 	.dashboard-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 	.report-select { min-width: 100%; }
 	.report-tab { min-width: 220px; }
+	.data-check-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 700px) {
@@ -411,4 +453,5 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 	.dashboard-metrics { grid-template-columns: 1fr; }
 	.dashboard-header-row { flex-direction: column; align-items: flex-start; }
 	.report-select { min-width: 100%; }
+	.data-check-metrics { grid-template-columns: 1fr; }
 }

@@ -4,8 +4,9 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 import json
+import logging
 import re
-from sqlalchemy import and_, case, func, literal, literal_column, not_, or_, select
+from sqlalchemy import and_, case, delete, func, literal, literal_column, not_, or_, select, tuple_
 from sqlalchemy.orm import Session
 from app.keyword_catalog import KeywordEntry, load_keyword_catalog, normalize_match_text
 from app.models import marketplace_research_results as listing_table
@@ -32,6 +33,8 @@ ALLOWED_FILTER_FIELDS = {
 }
 DEFAULT_FILTER_OPTION_PAGE_SIZE = 30
 MAX_FILTER_OPTION_PAGE_SIZE = 100
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_filter_value(value: str | None) -> str:
@@ -2028,6 +2031,348 @@ def fetch_all_listings_export_rows(
     )
     rows = db.execute(_apply_all_listings_sort(statement, sort_collected)).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _normalized_marketplace_expression():
+    return func.lower(func.trim(func.coalesce(listing_table.c.marketplace, "")))
+
+
+def _normalized_listing_id_expression():
+    return func.lower(func.trim(func.coalesce(listing_table.c.listing_id, "")))
+
+
+def _normalized_listing_status_expression():
+    return func.lower(func.trim(func.coalesce(listing_table.c.listing_status, "")))
+
+
+def _duplicate_listing_ordering():
+    status_priority = case(
+        (
+            _normalized_listing_status_expression().in_(["ended", "out_of_stock"]),
+            0,
+        ),
+        else_=1,
+    )
+    return [
+        status_priority,
+        listing_table.c.last_status_checked_at.desc().nulls_last(),
+        listing_table.c.updated_at.desc().nulls_last(),
+        listing_table.c.collected_at.desc().nulls_last(),
+        listing_table.c.listing_published_at.desc().nulls_last(),
+        listing_table.c.id.desc(),
+    ]
+
+
+def _duplicate_ranked_scope_statement():
+    normalized_marketplace = _normalized_marketplace_expression()
+    normalized_listing_id = _normalized_listing_id_expression()
+    return (
+        select(
+            listing_table.c.id,
+            listing_table.c.marketplace,
+            listing_table.c.listing_id,
+            listing_table.c.listing_title,
+            listing_table.c.listing_status,
+            listing_table.c.quantity,
+            listing_table.c.collected_at,
+            listing_table.c.updated_at,
+            listing_table.c.listing_published_at,
+            listing_table.c.last_status_checked_at,
+            normalized_marketplace.label("normalized_marketplace"),
+            normalized_listing_id.label("normalized_listing_id"),
+            func.row_number()
+            .over(
+                partition_by=[normalized_marketplace, normalized_listing_id],
+                order_by=_duplicate_listing_ordering(),
+            )
+            .label("row_number"),
+        )
+        .where(normalized_listing_id != "")
+    )
+
+
+def _duplicate_group_base_query(ranked_scope):
+    return (
+        select(
+            ranked_scope.c.normalized_marketplace,
+            ranked_scope.c.normalized_listing_id,
+            func.count().label("record_count"),
+            func.coalesce(
+                func.sum(case((ranked_scope.c.row_number > 1, 1), else_=0)),
+                0,
+            ).label("delete_count"),
+        )
+        .where(ranked_scope.c.normalized_listing_id != "")
+        .group_by(
+            ranked_scope.c.normalized_marketplace,
+            ranked_scope.c.normalized_listing_id,
+        )
+        .having(func.count() > 1)
+    )
+
+
+def fetch_duplicate_listing_summary(db: Session) -> dict:
+    normalized_marketplace = _normalized_marketplace_expression()
+    normalized_listing_id = _normalized_listing_id_expression()
+
+    total_records = int(db.execute(select(func.count()).select_from(listing_table)).scalar_one() or 0)
+
+    unique_listing_keys = int(
+        db.execute(
+            select(func.count(func.distinct(normalized_marketplace + literal("|") + normalized_listing_id)))
+            .select_from(listing_table)
+            .where(normalized_listing_id != "")
+        ).scalar_one()
+        or 0
+    )
+
+    missing_listing_id = int(
+        db.execute(
+            select(func.count())
+            .select_from(listing_table)
+            .where(normalized_listing_id == "")
+        ).scalar_one()
+        or 0
+    )
+
+    grouped = (
+        select(func.count().label("record_count"))
+        .select_from(listing_table)
+        .where(normalized_listing_id != "")
+        .group_by(normalized_marketplace, normalized_listing_id)
+        .having(func.count() > 1)
+    ).subquery("duplicate_grouped")
+
+    duplicate_groups = int(db.execute(select(func.count()).select_from(grouped)).scalar_one() or 0)
+    duplicate_records = int(
+        db.execute(select(func.coalesce(func.sum(grouped.c.record_count), 0)).select_from(grouped)).scalar_one() or 0
+    )
+    records_to_delete = int(
+        db.execute(select(func.coalesce(func.sum(grouped.c.record_count - 1), 0)).select_from(grouped)).scalar_one() or 0
+    )
+
+    return {
+        "total_records": total_records,
+        "unique_listing_keys": unique_listing_keys,
+        "duplicate_groups": duplicate_groups,
+        "duplicate_records": duplicate_records,
+        "records_to_delete": records_to_delete,
+        "missing_listing_id": missing_listing_id,
+    }
+
+
+def fetch_duplicate_listing_groups(
+    db: Session,
+    *,
+    page: int,
+    page_size: int,
+    marketplace: str | None,
+    listing_id: str | None,
+    status: str | None,
+) -> dict:
+    if page < 1:
+        raise ValueError("page must be >= 1")
+    if page_size < 1 or page_size > 200:
+        raise ValueError("page_size must be between 1 and 200")
+
+    ranked_scope = _duplicate_ranked_scope_statement().subquery("duplicate_ranked")
+    groups = _duplicate_group_base_query(ranked_scope).subquery("duplicate_groups")
+    keep_rows = select(ranked_scope).where(ranked_scope.c.row_number == 1).subquery("keep_rows")
+
+    query = (
+        select(
+            groups.c.normalized_marketplace,
+            groups.c.normalized_listing_id,
+            groups.c.record_count,
+            groups.c.delete_count,
+            keep_rows.c.id.label("keep_id"),
+            keep_rows.c.marketplace.label("keep_marketplace"),
+            keep_rows.c.listing_id.label("keep_listing_id"),
+            keep_rows.c.listing_title.label("keep_listing_title"),
+            keep_rows.c.listing_status.label("keep_listing_status"),
+            keep_rows.c.quantity.label("keep_quantity"),
+            keep_rows.c.collected_at.label("keep_collected_at"),
+            keep_rows.c.updated_at.label("keep_updated_at"),
+            keep_rows.c.listing_published_at.label("keep_listing_published_at"),
+            keep_rows.c.last_status_checked_at.label("keep_last_status_checked_at"),
+        )
+        .select_from(
+            groups.join(
+                keep_rows,
+                and_(
+                    groups.c.normalized_marketplace == keep_rows.c.normalized_marketplace,
+                    groups.c.normalized_listing_id == keep_rows.c.normalized_listing_id,
+                ),
+            )
+        )
+    )
+
+    normalized_marketplace_filter = _normalize_filter_value(marketplace)
+    if normalized_marketplace_filter:
+        query = query.where(groups.c.normalized_marketplace == normalized_marketplace_filter)
+
+    normalized_listing_id_filter = _normalize_filter_value(listing_id)
+    if normalized_listing_id_filter:
+        query = query.where(groups.c.normalized_listing_id == normalized_listing_id_filter)
+
+    normalized_status_filter = _normalize_filter_value(status)
+    if normalized_status_filter:
+        query = query.where(func.lower(func.trim(func.coalesce(keep_rows.c.listing_status, ""))) == normalized_status_filter)
+
+    total_groups = int(db.execute(select(func.count()).select_from(query.order_by(None).subquery())).scalar_one() or 0)
+
+    paged_rows = db.execute(
+        query.order_by(
+            groups.c.delete_count.desc(),
+            groups.c.record_count.desc(),
+            groups.c.normalized_marketplace.asc(),
+            groups.c.normalized_listing_id.asc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).mappings().all()
+
+    if not paged_rows:
+        return {
+            "items": [],
+            "page": page,
+            "page_size": page_size,
+            "total_groups": total_groups,
+        }
+
+    grouped_payload: dict[tuple[str, str], dict] = {}
+    selected_keys: list[tuple[str, str]] = []
+
+    for row in paged_rows:
+        key = (row["normalized_marketplace"], row["normalized_listing_id"])
+        selected_keys.append(key)
+        grouped_payload[key] = {
+            "marketplace": row["keep_marketplace"] or row["normalized_marketplace"],
+            "listing_id": row["keep_listing_id"] or row["normalized_listing_id"],
+            "record_count": int(row["record_count"] or 0),
+            "keep_record": {
+                "id": row["keep_id"],
+                "marketplace": row["keep_marketplace"],
+                "listing_id": row["keep_listing_id"],
+                "listing_title": row["keep_listing_title"],
+                "listing_status": row["keep_listing_status"],
+                "quantity": row["keep_quantity"],
+                "collected_at": row["keep_collected_at"],
+                "updated_at": row["keep_updated_at"],
+                "listing_published_at": row["keep_listing_published_at"],
+                "last_status_checked_at": row["keep_last_status_checked_at"],
+            },
+            "delete_records": [],
+        }
+
+    ranked_rows = db.execute(
+        select(
+            ranked_scope.c.id,
+            ranked_scope.c.marketplace,
+            ranked_scope.c.listing_id,
+            ranked_scope.c.listing_title,
+            ranked_scope.c.listing_status,
+            ranked_scope.c.quantity,
+            ranked_scope.c.collected_at,
+            ranked_scope.c.updated_at,
+            ranked_scope.c.listing_published_at,
+            ranked_scope.c.last_status_checked_at,
+            ranked_scope.c.normalized_marketplace,
+            ranked_scope.c.normalized_listing_id,
+            ranked_scope.c.row_number,
+        )
+        .where(
+            tuple_(
+                ranked_scope.c.normalized_marketplace,
+                ranked_scope.c.normalized_listing_id,
+            ).in_(selected_keys)
+        )
+        .order_by(
+            ranked_scope.c.normalized_marketplace.asc(),
+            ranked_scope.c.normalized_listing_id.asc(),
+            ranked_scope.c.row_number.asc(),
+            ranked_scope.c.id.desc(),
+        )
+    ).mappings().all()
+
+    for row in ranked_rows:
+        key = (row["normalized_marketplace"], row["normalized_listing_id"])
+        if row["row_number"] <= 1:
+            continue
+        grouped_payload[key]["delete_records"].append(
+            {
+                "id": row["id"],
+                "marketplace": row["marketplace"],
+                "listing_id": row["listing_id"],
+                "listing_title": row["listing_title"],
+                "listing_status": row["listing_status"],
+                "quantity": row["quantity"],
+                "collected_at": row["collected_at"],
+                "updated_at": row["updated_at"],
+                "listing_published_at": row["listing_published_at"],
+                "last_status_checked_at": row["last_status_checked_at"],
+            }
+        )
+
+    items = [
+        grouped_payload[(row["normalized_marketplace"], row["normalized_listing_id"])]
+        for row in paged_rows
+    ]
+
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total_groups": total_groups,
+    }
+
+
+def cleanup_duplicate_listings(db: Session) -> dict:
+    pre_summary = fetch_duplicate_listing_summary(db)
+    records_to_delete = int(pre_summary.get("records_to_delete") or 0)
+    duplicate_groups = int(pre_summary.get("duplicate_groups") or 0)
+
+    if records_to_delete <= 0:
+        logger.info("Duplicate cleanup skipped: no duplicate records found")
+        return {
+            "duplicate_groups_processed": 0,
+            "records_deleted": 0,
+            "records_remaining": int(pre_summary.get("total_records") or 0),
+        }
+
+    ranked_scope = _duplicate_ranked_scope_statement().subquery("ranked_cleanup")
+    delete_ids = select(ranked_scope.c.id).where(ranked_scope.c.row_number > 1)
+
+    try:
+        delete_result = db.execute(delete(listing_table).where(listing_table.c.id.in_(delete_ids)))
+        deleted_count = int(delete_result.rowcount or 0)
+
+        post_summary = fetch_duplicate_listing_summary(db)
+        remaining_to_delete = int(post_summary.get("records_to_delete") or 0)
+        if remaining_to_delete != 0:
+            raise RuntimeError(
+                "Duplicate cleanup verification failed: records_to_delete is not zero after cleanup"
+            )
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    records_remaining = int(post_summary.get("total_records") or 0)
+    records_kept = records_remaining
+    logger.info(
+        "Duplicate cleanup completed: groups_processed=%s records_kept=%s records_deleted=%s",
+        duplicate_groups,
+        records_kept,
+        deleted_count,
+    )
+
+    return {
+        "duplicate_groups_processed": duplicate_groups,
+        "records_deleted": deleted_count,
+        "records_remaining": records_remaining,
+    }
 
 
 def _parse_dashboard_granularity(granularity: str | None) -> str:

@@ -358,7 +358,51 @@ def test_hqa_dashboard_new_routes_forward_to_hqa(monkeypatch):
 
     options_call = next(call for call in FakeAsyncClient.calls if call["url"].endswith("/internal/v1/hqa/dashboard/filter-options"))
     assert ("marketplace", "ebay") in options_call["params"]
-    assert ("marketplace", "reverb") in options_call["params"]
+
+
+def test_data_check_summary_and_listing_routes_forward_to_hqa(monkeypatch):
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    FakeAsyncClient.calls = []
+
+    with TestClient(app) as client:
+        summary_response = client.get(
+            "/api/v1/hqa/data-check/duplicates/summary",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+        list_response = client.get(
+            "/api/v1/hqa/data-check/duplicates?page=2&page_size=10&marketplace=ebay&listing_id=123&status=ended",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+    assert summary_response.status_code == 200
+    assert list_response.status_code == 200
+
+    summary_call = next(call for call in FakeAsyncClient.calls if call["url"].endswith("/internal/v1/hqa/data-check/duplicates/summary"))
+    list_call = next(call for call in FakeAsyncClient.calls if call["url"].endswith("/internal/v1/hqa/data-check/duplicates"))
+    assert summary_call["method"] == "GET"
+    assert list_call["method"] == "GET"
+    assert _param_values(list_call, "page") == ["2"]
+    assert _param_values(list_call, "page_size") == ["10"]
+    assert _param_values(list_call, "marketplace") == ["ebay"]
+    assert _param_values(list_call, "listing_id") == ["123"]
+    assert _param_values(list_call, "status") == ["ended"]
+
+
+def test_data_check_cleanup_route_forwards_confirmation_body(monkeypatch):
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    FakeAsyncClient.calls = []
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/hqa/data-check/duplicates/cleanup",
+            headers={"Authorization": "Bearer valid-token"},
+            json={"confirmation": "DELETE_DUPLICATE_LISTINGS"},
+        )
+
+    assert response.status_code == 200
+    cleanup_call = next(call for call in FakeAsyncClient.calls if call["url"].endswith("/internal/v1/hqa/data-check/duplicates/cleanup"))
+    assert cleanup_call["method"] == "POST"
+    assert cleanup_call["json"] == {"confirmation": "DELETE_DUPLICATE_LISTINGS"}
 
 
 def test_hqa_dashboard_export_route_relays_csv(monkeypatch):

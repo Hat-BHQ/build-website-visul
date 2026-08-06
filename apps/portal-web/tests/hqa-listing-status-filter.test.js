@@ -10,6 +10,7 @@ const styles = fs.readFileSync(stylesCssPath, 'utf8');
 assert(source.includes("const HQA_MAIN_TABS = ["), 'HQA tabs list must exist');
 assert(source.includes("{ key: 'all_listings', label: 'All Listings' }"), 'All Listings tab must exist');
 assert(source.includes("{ key: 'dashboard', label: 'Dashboard' }"), 'Dashboard tab must exist');
+assert(source.includes("{ key: 'data_check', label: 'Kiem tra du lieu' }"), 'Data check tab must exist');
 assert(!source.includes("{ key: 'daily_report', label: 'Daily Report' }"), 'Daily Report tab must be removed from main tabs');
 assert(!source.includes('/hqa/reports/marketplace/listings?${'), 'All Listings flow must not call Daily Report listings endpoint');
 assert(!source.includes('/hqa/reports/marketplace/summary?${'), 'All Listings flow must not call Daily Report summary endpoint');
@@ -79,5 +80,12 @@ assert(source.includes('/hqa/dashboard/alerts'), 'Dashboard must use alerts API'
 assert(source.includes('/hqa/dashboard/export?${'), 'Dashboard export must use new API');
 assert(source.includes('appliedSellerFilters'), 'Dashboard state must separate seller filters');
 assert(source.includes('appliedPriceFilters'), 'Dashboard state must separate price filters');
+
+assert(source.includes('/hqa/data-check/duplicates/summary'), 'Data check summary API must be used');
+assert(source.includes('/hqa/data-check/duplicates?${buildDataCheckParams(page).toString()}'), 'Data check duplicate groups API must be used');
+assert(source.includes('/hqa/data-check/duplicates/cleanup'), 'Data check cleanup API must be used');
+assert(source.includes('DELETE_DUPLICATE_LISTINGS'), 'Cleanup confirmation token must be enforced in frontend flow');
+assert(source.includes('Không phát hiện listing trùng') || source.includes('Khong phat hien listing trung'), 'No-duplicates empty state must be shown');
+assert(!source.includes('function dedupeAllListingsItems('), 'Frontend must not deduplicate listings in JavaScript');
 
 console.log('hqa-listing-status-filter tests passed');

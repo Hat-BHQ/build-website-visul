@@ -5,6 +5,9 @@
   "scripts": {
     "lint": "node --check assets/app.js",
     "build": "node --check assets/app.js",
-    "test": "node --check assets/app.js && node tests/hqa-listing-status-filter.test.js"
+    "test": "node --check assets/app.js && node tests/hqa-listing-status-filter.test.js && node tests/hqa-data-check-modal-interaction.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
   }
 }

@@ -134,6 +134,26 @@ async def hqa_all_listings_export(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/listings/export", request)
 
 
+@app.get("/api/v1/hqa/data-check/duplicates/summary")
+async def hqa_data_check_duplicates_summary(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/data-check/duplicates/summary", request)
+
+
+@app.get("/api/v1/hqa/data-check/duplicates")
+async def hqa_data_check_duplicates(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/data-check/duplicates", request)
+
+
+@app.post("/api/v1/hqa/data-check/duplicates/cleanup")
+async def hqa_data_check_duplicates_cleanup(request: Request):
+    return await relay(
+        "POST",
+        f"{settings.hqa_service_url}/internal/v1/hqa/data-check/duplicates/cleanup",
+        request,
+        await request.json(),
+    )
+
+
 @app.get("/api/v1/hqa/dashboard/filter-options")
 async def hqa_dashboard_filter_options(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/filter-options", request)

@@ -160,6 +160,25 @@ const state = {
       pricesByKeyword: { items: [] },
       alerts: { alerts: [] },
     },
+    dataCheck: {
+      hasRun: false,
+      loading: false,
+      loadingCleanup: false,
+      error: '',
+      summary: null,
+      groups: null,
+      page: 1,
+      pageSize: 20,
+      filters: {
+        marketplace: '',
+        listingId: '',
+        status: '',
+      },
+      expandedKeys: {},
+      showConfirmModal: false,
+      confirmationInput: '',
+      cleanupResult: null,
+    },
   },
 };
 
@@ -241,6 +260,7 @@ const REPORT_META = {
 const HQA_MAIN_TABS = [
   { key: 'all_listings', label: 'All Listings' },
   { key: 'dashboard', label: 'Dashboard' },
+  { key: 'data_check', label: 'Kiem tra du lieu' },
 ];
 const PAGE_SIZE_OPTIONS = [30, 50, 100, 200];
 const ALL_LISTINGS_BASE_OPTION_FIELDS = {
@@ -523,6 +543,7 @@ function buildHqaShellMarkup() {
         </section>
       </section>
       <section id="hqa-dashboard-view" class="panel" hidden></section>
+      <section id="hqa-data-check-view" class="panel" hidden></section>
     </section>`;
 }
 
@@ -555,10 +576,16 @@ function setHqaMainTab(tabKey) {
 function renderHqaMainTabVisibility() {
   const standardView = document.getElementById('hqa-standard-view');
   const dashboardView = document.getElementById('hqa-dashboard-view');
-  if (!standardView || !dashboardView) return;
+  const dataCheckView = document.getElementById('hqa-data-check-view');
+  if (!standardView || !dashboardView || !dataCheckView) return;
   const isDashboard = state.hqa.mainTab === 'dashboard';
+  const isDataCheck = state.hqa.mainTab === 'data_check';
   standardView.hidden = isDashboard;
+  if (isDataCheck) {
+    standardView.hidden = true;
+  }
   dashboardView.hidden = !isDashboard;
+  dataCheckView.hidden = !isDataCheck;
 }
 
 function appendDashboardListParams(params, key, values) {
@@ -819,6 +846,325 @@ function renderHqaDashboard() {
       <h3>Top sellers</h3>
       <div class="table-wrap"><table><thead><tr><th>Seller</th><th>Listings</th><th>Unique listings</th><th>Avg price</th><th>Min</th><th>Max</th></tr></thead><tbody>${(data.topSellers?.items || []).map((item) => `<tr><td>${escapeHtml(item.seller || '-')}</td><td>${formatRecordCount(item.listing_count || 0)}</td><td>${formatRecordCount(item.unique_listings || 0)}</td><td>${formatRecordCount(item.avg_price || 0)}</td><td>${formatRecordCount(item.min_price || 0)}</td><td>${formatRecordCount(item.max_price || 0)}</td></tr>`).join('')}</tbody></table></div>
     </div>`;
+}
+
+function dataCheckGroupKey(item) {
+  const marketplace = String(item?.marketplace || '').trim().toLowerCase();
+  const listingId = String(item?.listing_id || '').trim().toLowerCase();
+  return `${marketplace}::${listingId}`;
+}
+
+function buildDataCheckParams(page = 1) {
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('page_size', String(state.hqa.dataCheck.pageSize || 20));
+  const filters = state.hqa.dataCheck.filters || {};
+  if (filters.marketplace) params.set('marketplace', filters.marketplace.trim());
+  if (filters.listingId) params.set('listing_id', filters.listingId.trim());
+  if (filters.status) params.set('status', filters.status.trim());
+  return params;
+}
+
+async function loadDataCheckSummaryAndGroups(page = 1) {
+  state.hqa.dataCheck.loading = true;
+  state.hqa.dataCheck.error = '';
+  try {
+    const [summary, groups] = await Promise.all([
+      api('/hqa/data-check/duplicates/summary'),
+      api(`/hqa/data-check/duplicates?${buildDataCheckParams(page).toString()}`),
+    ]);
+    state.hqa.dataCheck.hasRun = true;
+    state.hqa.dataCheck.summary = summary;
+    state.hqa.dataCheck.groups = groups;
+    state.hqa.dataCheck.page = Number(groups?.page || page);
+  } catch (error) {
+    state.hqa.dataCheck.error = error.message || 'Khong the kiem tra du lieu.';
+  } finally {
+    state.hqa.dataCheck.loading = false;
+  }
+}
+
+function renderDataCheckDetailRows(item) {
+  const keepRecord = item.keep_record || {};
+  const allRows = [
+    { ...keepRecord, keep: true },
+    ...((item.delete_records || []).map((row) => ({ ...row, keep: false }))),
+  ];
+  if (!allRows.length) return '<div class="empty-state">Khong co record chi tiet.</div>';
+  return `
+    <div class="table-wrap data-check-detail-table-wrap">
+      <table class="data-check-detail-table">
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>ID</th>
+            <th>Listing title</th>
+            <th>Status</th>
+            <th>Quantity</th>
+            <th>Collected at</th>
+            <th>Updated at</th>
+            <th>Listing published at</th>
+            <th>Last status checked at</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${allRows.map((row) => `<tr>
+            <td><span class="${row.keep ? 'data-check-keep-pill' : 'data-check-delete-pill'}">${row.keep ? 'Giu lai' : 'Se xoa'}</span></td>
+            <td>${escapeHtml(row.id || '-')}</td>
+            <td>${escapeHtml(row.listing_title || '-')}</td>
+            <td>${escapeHtml(normalizeListingStatus(row.listing_status).label)}</td>
+            <td>${escapeHtml(row.quantity ?? '-')}</td>
+            <td>${escapeHtml(formatDateTimeHcm(row.collected_at))}</td>
+            <td>${escapeHtml(formatDateTimeHcm(row.updated_at))}</td>
+            <td>${escapeHtml(formatDateTimeHcm(row.listing_published_at))}</td>
+            <td>${escapeHtml(formatDateTimeHcm(row.last_status_checked_at))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderDataCheckTable() {
+  const groups = state.hqa.dataCheck.groups;
+  if (!groups || !groups.items?.length) {
+    if (!state.hqa.dataCheck.hasRun) {
+      return '<div class="empty-state">Nhan "Kiem tra du lieu" de quet bang marketplace_research_results.</div>';
+    }
+    return '<div class="empty-state">Không phát hiện listing trùng</div>';
+  }
+
+  return `
+    <div class="table-wrap">
+      <table class="data-check-table">
+        <thead>
+          <tr>
+            <th>Marketplace</th>
+            <th>Listing ID</th>
+            <th>So record trung</th>
+            <th>Record duoc giu</th>
+            <th>Trang thai duoc giu</th>
+            <th>Last status checked</th>
+            <th>So record se xoa</th>
+            <th>Chi tiet</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${groups.items.map((item) => {
+            const key = dataCheckGroupKey(item);
+            const expanded = Boolean(state.hqa.dataCheck.expandedKeys[key]);
+            const keep = item.keep_record || {};
+            const deleteCount = Number(item.delete_records?.length || 0);
+            return `
+              <tr>
+                <td>${escapeHtml(item.marketplace || '-')}</td>
+                <td>${escapeHtml(item.listing_id || '-')}</td>
+                <td>${formatRecordCount(item.record_count || 0)}</td>
+                <td>${escapeHtml(keep.id || '-')}</td>
+                <td><span class="status-pill ${statusClass(keep.listing_status)}">${escapeHtml(normalizeListingStatus(keep.listing_status).label)}</span></td>
+                <td>${escapeHtml(formatDateTimeHcm(keep.last_status_checked_at))}</td>
+                <td>${formatRecordCount(deleteCount)}</td>
+                <td><button type="button" data-data-check-toggle="${escapeHtml(key)}">${expanded ? 'An chi tiet' : 'Xem chi tiet'}</button></td>
+              </tr>
+              ${expanded ? `<tr><td colspan="8">${renderDataCheckDetailRows(item)}</td></tr>` : ''}
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="listing-footer-summary data-check-pager">
+      <div class="listing-page-count">Page ${groups.page || 1} / ${Math.max(1, Math.ceil((groups.total_groups || 0) / (groups.page_size || 20)))}</div>
+      <div class="inline-actions">
+        <button type="button" data-data-check-page="prev" ${(groups.page || 1) <= 1 ? 'disabled' : ''}>Previous</button>
+        <button type="button" data-data-check-page="next" ${((groups.page || 1) * (groups.page_size || 20)) >= (groups.total_groups || 0) ? 'disabled' : ''}>Next</button>
+      </div>
+    </div>`;
+}
+
+function renderDataCheckModal() {
+  const existing = document.querySelector('.data-check-modal-backdrop');
+  if (!state.hqa.dataCheck.showConfirmModal) {
+    if (existing) existing.remove();
+    if (state.hqa.dataCheck.modalKeydownHandler) {
+      document.removeEventListener('keydown', state.hqa.dataCheck.modalKeydownHandler);
+      state.hqa.dataCheck.modalKeydownHandler = null;
+    }
+    return;
+  }
+
+  const recordsToDelete = Number(state.hqa.dataCheck.summary?.records_to_delete || 0);
+  if (existing) existing.remove();
+  if (state.hqa.dataCheck.modalKeydownHandler) {
+    document.removeEventListener('keydown', state.hqa.dataCheck.modalKeydownHandler);
+    state.hqa.dataCheck.modalKeydownHandler = null;
+  }
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'data-check-modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="data-check-modal" role="dialog" aria-modal="true" aria-label="Xac nhan xoa du lieu trung">
+      <h3>Xac nhan xoa du lieu trung</h3>
+      <p>Ban sap xoa <strong>${formatRecordCount(recordsToDelete)}</strong> record trung.</p>
+      <p>Nhap chinh xac: <strong>DELETE_DUPLICATE_LISTINGS</strong></p>
+      <input id="data-check-confirm-input" autocomplete="off" spellcheck="false" placeholder="DELETE_DUPLICATE_LISTINGS" value="${escapeHtml(state.hqa.dataCheck.confirmationInput || '')}">
+      <div class="inline-actions data-check-modal-actions">
+        <button type="button" id="data-check-cancel-button">Huy</button>
+        <button type="button" id="data-check-confirm-button">Xoa du lieu trung</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const dialog = backdrop.querySelector('.data-check-modal');
+  const input = backdrop.querySelector('#data-check-confirm-input');
+  const cancelButton = backdrop.querySelector('#data-check-cancel-button');
+  const confirmButton = backdrop.querySelector('#data-check-confirm-button');
+
+  const updateControls = () => {
+    const tokenMatched = (state.hqa.dataCheck.confirmationInput || '').trim() === 'DELETE_DUPLICATE_LISTINGS';
+    const loading = Boolean(state.hqa.dataCheck.loadingCleanup);
+    input.disabled = loading;
+    cancelButton.disabled = loading;
+    confirmButton.disabled = loading || !tokenMatched;
+    confirmButton.textContent = loading ? 'Dang xoa...' : 'Xoa du lieu trung';
+  };
+
+  const closeModal = () => {
+    if (state.hqa.dataCheck.loadingCleanup) return;
+    state.hqa.dataCheck.showConfirmModal = false;
+    state.hqa.dataCheck.confirmationInput = '';
+    backdrop.remove();
+    if (state.hqa.dataCheck.modalKeydownHandler) {
+      document.removeEventListener('keydown', state.hqa.dataCheck.modalKeydownHandler);
+      state.hqa.dataCheck.modalKeydownHandler = null;
+    }
+    renderDataCheckView();
+  };
+
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop) {
+      closeModal();
+    }
+  });
+
+  dialog.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+
+  input.addEventListener('input', (event) => {
+    state.hqa.dataCheck.confirmationInput = String(event.target.value || '');
+    updateControls();
+  });
+
+  input.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (confirmButton.disabled) return;
+    confirmButton.click();
+  });
+
+  cancelButton.addEventListener('click', () => {
+    closeModal();
+  });
+
+  confirmButton.addEventListener('click', async () => {
+    if ((state.hqa.dataCheck.confirmationInput || '').trim() !== 'DELETE_DUPLICATE_LISTINGS') {
+      updateControls();
+      return;
+    }
+    state.hqa.dataCheck.loadingCleanup = true;
+    updateControls();
+    await executeDataCheckCleanup();
+    if (!state.hqa.dataCheck.showConfirmModal) {
+      if (state.hqa.dataCheck.modalKeydownHandler) {
+        document.removeEventListener('keydown', state.hqa.dataCheck.modalKeydownHandler);
+        state.hqa.dataCheck.modalKeydownHandler = null;
+      }
+      backdrop.remove();
+      return;
+    }
+    state.hqa.dataCheck.loadingCleanup = false;
+    updateControls();
+  });
+
+  const keydownHandler = (event) => {
+    if (event.key === 'Escape') {
+      closeModal();
+    }
+  };
+  state.hqa.dataCheck.modalKeydownHandler = keydownHandler;
+  document.addEventListener('keydown', keydownHandler);
+
+  updateControls();
+  requestAnimationFrame(() => {
+    input.focus();
+  });
+}
+
+function renderDataCheckView() {
+  const view = document.getElementById('hqa-data-check-view');
+  if (!view) return;
+  const summary = state.hqa.dataCheck.summary || {
+    total_records: 0,
+    unique_listing_keys: 0,
+    duplicate_groups: 0,
+    duplicate_records: 0,
+    records_to_delete: 0,
+    missing_listing_id: 0,
+  };
+  const canCleanup = state.hqa.dataCheck.hasRun && Number(summary.records_to_delete || 0) > 0;
+
+  view.innerHTML = `
+    <div class="dashboard-header-row">
+      <h2>Kiem tra du lieu listing trung</h2>
+      <div class="inline-actions">
+        <button type="button" id="data-check-run" ${state.hqa.dataCheck.loading ? 'disabled' : ''}>${state.hqa.dataCheck.loading ? 'Dang kiem tra...' : 'Kiem tra du lieu'}</button>
+        <button type="button" id="data-check-refresh" ${(state.hqa.dataCheck.loading || !state.hqa.dataCheck.hasRun) ? 'disabled' : ''}>Lam moi</button>
+        ${canCleanup ? `<button type="button" id="data-check-cleanup" ${state.hqa.dataCheck.loadingCleanup ? 'disabled' : ''}>${state.hqa.dataCheck.loadingCleanup ? 'Dang xu ly...' : 'Xoa du lieu trung'}</button>` : ''}
+      </div>
+    </div>
+    ${state.hqa.dataCheck.error ? `<div class="error">${escapeHtml(state.hqa.dataCheck.error)}</div>` : ''}
+    ${state.hqa.dataCheck.cleanupResult ? `<div class="hqa-toast hqa-toast-success"><span>Da xoa ${formatRecordCount(state.hqa.dataCheck.cleanupResult.records_deleted || 0)} record trung.</span></div>` : ''}
+    <div class="metrics data-check-metrics">
+      ${metric('Tong record', summary.total_records || 0)}
+      ${metric('Listing duy nhat', summary.unique_listing_keys || 0)}
+      ${metric('Nhom bi trung', summary.duplicate_groups || 0)}
+      ${metric('Record bi trung', summary.duplicate_records || 0)}
+      ${metric('Record se xoa', summary.records_to_delete || 0)}
+      ${metric('Record thieu listing ID', summary.missing_listing_id || 0)}
+    </div>
+    <form id="data-check-filters" class="filters hqa-filter-grid">
+      <label class="filter-field filter-field--product"><span class="filter-field__label">Marketplace</span><input id="data-check-marketplace" value="${escapeHtml(state.hqa.dataCheck.filters.marketplace)}" placeholder="ebay"></label>
+      <label class="filter-field filter-field--product"><span class="filter-field__label">Listing ID</span><input id="data-check-listing-id" value="${escapeHtml(state.hqa.dataCheck.filters.listingId)}" placeholder="398210152319"></label>
+      <label class="filter-field filter-field--status"><span class="filter-field__label">Status (record giu)</span><input id="data-check-status" value="${escapeHtml(state.hqa.dataCheck.filters.status)}" placeholder="ended"></label>
+      <div class="filter-actions"><button type="submit" ${(state.hqa.dataCheck.loading || !state.hqa.dataCheck.hasRun) ? 'disabled' : ''}>Loc ket qua</button></div>
+    </form>
+    ${state.hqa.dataCheck.hasRun && Number(summary.records_to_delete || 0) <= 0 ? '<div class="empty-state">Không phát hiện listing trùng</div>' : ''}
+    ${renderDataCheckTable()}
+  `;
+  renderDataCheckModal();
+}
+
+async function executeDataCheckCleanup() {
+  state.hqa.dataCheck.error = '';
+  renderDataCheckView();
+  try {
+    const response = await api('/hqa/data-check/duplicates/cleanup', {
+      method: 'POST',
+      body: JSON.stringify({ confirmation: 'DELETE_DUPLICATE_LISTINGS' }),
+    });
+    state.hqa.dataCheck.cleanupResult = response;
+    state.hqa.dataCheck.showConfirmModal = false;
+    state.hqa.dataCheck.confirmationInput = '';
+    await loadDataCheckSummaryAndGroups(1);
+    await loadAllListingsSummary();
+    renderHqaSummary();
+    await loadActiveListings({ scrollToTable: false });
+    setAllListingsNotification('success', `Da xoa ${formatRecordCount(response.records_deleted || 0)} record trung.`);
+  } catch (error) {
+    state.hqa.dataCheck.error = error.message || 'Xoa du lieu trung that bai.';
+  } finally {
+    state.hqa.dataCheck.loadingCleanup = false;
+    renderDataCheckView();
+  }
 }
 
 async function downloadCsv(path, filename, retry = true) {
@@ -1534,21 +1880,6 @@ function setListingsLoading(isLoading) {
   });
 }
 
-function dedupeAllListingsItems(items) {
-  const seen = new Set();
-  const deduped = [];
-  for (const item of items || []) {
-    const marketplace = String(item?.marketplace || '').trim().toLowerCase();
-    const listingId = String(item?.listing_id || '').trim().toLowerCase();
-    const fallbackId = String(item?.id || '').trim().toLowerCase();
-    const key = listingId ? `${marketplace}::${listingId}` : `${marketplace}::id::${fallbackId}`;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(item);
-  }
-  return deduped;
-}
-
 async function loadActiveListings({ resetPage = false, scrollToTable = false } = {}) {
   if (resetPage) {
     state.hqa.page = 1;
@@ -1573,12 +1904,11 @@ async function loadActiveListings({ resetPage = false, scrollToTable = false } =
 
     if (requestId !== listingsRequestSequence) return;
 
-    const dedupedItems = dedupeAllListingsItems(payload.items || []);
     state.hqa.rawListings = {
       ...payload,
-      items: dedupedItems,
-      to_record: dedupedItems.length
-        ? Number(payload.from_record || ((payload.page - 1) * payload.page_size + 1)) + dedupedItems.length - 1
+      items: payload.items || [],
+      to_record: (payload.items || []).length
+        ? Number(payload.from_record || ((payload.page - 1) * payload.page_size + 1)) + (payload.items || []).length - 1
         : 0,
     };
 
@@ -1913,10 +2243,12 @@ async function renderHqa(content, options = {}) {
   const { reloadData = true } = options;
   ensureHqaShell(content);
 
-  if (state.hqa.mainTab !== 'dashboard') {
+  if (!HQA_MAIN_TABS.some((tab) => tab.key === state.hqa.mainTab)) {
     state.hqa.mainTab = 'all_listings';
   }
-  state.hqa.activeReport = 'all_listings';
+  if (state.hqa.mainTab === 'all_listings') {
+    state.hqa.activeReport = 'all_listings';
+  }
 
   renderHqaMainTabs();
   renderHqaMainTabVisibility();
@@ -1929,6 +2261,8 @@ async function renderHqa(content, options = {}) {
       await loadHqaDashboardData();
     }
     renderHqaDashboard();
+  } else if (state.hqa.mainTab === 'data_check') {
+    renderDataCheckView();
   } else {
     renderHqaFilterOptions();
     renderHqaSummary();
@@ -1963,6 +2297,16 @@ async function renderHqa(content, options = {}) {
       if (state.hqa.mainTab === 'dashboard') {
         await loadHqaDashboardData();
         renderHqaDashboard();
+        return;
+      }
+
+      if (state.hqa.mainTab === 'data_check') {
+        if (!state.hqa.dataCheck.hasRun) {
+          renderDataCheckView();
+          return;
+        }
+        await loadDataCheckSummaryAndGroups(state.hqa.dataCheck.page || 1);
+        renderDataCheckView();
         return;
       }
 
@@ -2191,6 +2535,90 @@ async function renderHqa(content, options = {}) {
       setHqaMainTab('all_listings');
       state.hqa.page = 1;
       await renderHqa(content, { reloadData: true });
+    });
+  }
+
+  const dataCheckFilters = document.getElementById('data-check-filters');
+  if (dataCheckFilters && !dataCheckFilters.dataset.bound) {
+    dataCheckFilters.dataset.bound = 'true';
+    dataCheckFilters.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      state.hqa.dataCheck.filters = {
+        marketplace: document.getElementById('data-check-marketplace')?.value.trim() || '',
+        listingId: document.getElementById('data-check-listing-id')?.value.trim() || '',
+        status: document.getElementById('data-check-status')?.value.trim() || '',
+      };
+      state.hqa.dataCheck.page = 1;
+      await loadDataCheckSummaryAndGroups(1);
+      renderDataCheckView();
+      await renderHqa(content, { reloadData: false });
+    });
+  }
+
+  const dataCheckRunButton = document.getElementById('data-check-run');
+  if (dataCheckRunButton && !dataCheckRunButton.dataset.bound) {
+    dataCheckRunButton.dataset.bound = 'true';
+    dataCheckRunButton.addEventListener('click', async () => {
+      state.hqa.dataCheck.cleanupResult = null;
+      state.hqa.dataCheck.expandedKeys = {};
+      state.hqa.dataCheck.page = 1;
+      await loadDataCheckSummaryAndGroups(1);
+      renderDataCheckView();
+      await renderHqa(content, { reloadData: false });
+    });
+  }
+
+  const dataCheckRefreshButton = document.getElementById('data-check-refresh');
+  if (dataCheckRefreshButton && !dataCheckRefreshButton.dataset.bound) {
+    dataCheckRefreshButton.dataset.bound = 'true';
+    dataCheckRefreshButton.addEventListener('click', async () => {
+      if (!state.hqa.dataCheck.hasRun) return;
+      await loadDataCheckSummaryAndGroups(state.hqa.dataCheck.page || 1);
+      renderDataCheckView();
+      await renderHqa(content, { reloadData: false });
+    });
+  }
+
+  const dataCheckCleanupButton = document.getElementById('data-check-cleanup');
+  if (dataCheckCleanupButton && !dataCheckCleanupButton.dataset.bound) {
+    dataCheckCleanupButton.dataset.bound = 'true';
+    dataCheckCleanupButton.addEventListener('click', () => {
+      state.hqa.dataCheck.showConfirmModal = true;
+      state.hqa.dataCheck.confirmationInput = '';
+      renderDataCheckView();
+    });
+  }
+
+  const dataCheckContainer = document.getElementById('hqa-data-check-view');
+  if (dataCheckContainer && !dataCheckContainer.dataset.bound) {
+    dataCheckContainer.dataset.bound = 'true';
+    dataCheckContainer.addEventListener('click', async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const toggleButton = target.closest('[data-data-check-toggle]');
+      if (toggleButton) {
+        const key = toggleButton.getAttribute('data-data-check-toggle') || '';
+        if (!key) return;
+        state.hqa.dataCheck.expandedKeys = {
+          ...state.hqa.dataCheck.expandedKeys,
+          [key]: !state.hqa.dataCheck.expandedKeys[key],
+        };
+        renderDataCheckView();
+        await renderHqa(content, { reloadData: false });
+        return;
+      }
+
+      const pageButton = target.closest('[data-data-check-page]');
+      if (pageButton) {
+        const action = pageButton.getAttribute('data-data-check-page') || '';
+        const currentPage = Number(state.hqa.dataCheck.groups?.page || state.hqa.dataCheck.page || 1);
+        const nextPage = action === 'prev' ? Math.max(1, currentPage - 1) : currentPage + 1;
+        await loadDataCheckSummaryAndGroups(nextPage);
+        renderDataCheckView();
+        await renderHqa(content, { reloadData: false });
+        return;
+      }
     });
   }
 }

@@ -3,6 +3,7 @@ import csv
 import io
 from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.config import settings
@@ -16,6 +17,8 @@ from app.service import (
     fetch_all_listings_filter_option_page,
     fetch_all_listings_filter_options,
     fetch_all_listings_summary,
+    fetch_duplicate_listing_groups,
+    fetch_duplicate_listing_summary,
     fetch_dashboard_counts,
     fetch_hqa_dashboard_alerts,
     fetch_hqa_dashboard_export_rows,
@@ -40,10 +43,15 @@ from app.service import (
     fetch_marketplace_raw_listings,
     fetch_marketplace_report_listings,
     fetch_marketplace_report_summary,
+    cleanup_duplicate_listings,
 )
 
 
 app = FastAPI(title="HQA Service", version="2.0.0")
+
+
+class DuplicateCleanupRequest(BaseModel):
+    confirmation: str
 
 
 def _today_hcm():
@@ -369,6 +377,51 @@ def hqa_all_listings_export(
     if not rows:
         raise HTTPException(status_code=404, detail="No data available for export")
     return _to_csv_response("hqa_all_listings.csv", rows, include_bom=True)
+
+
+@app.get("/internal/v1/hqa/data-check/duplicates/summary")
+def hqa_duplicate_listing_summary(
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.data_cleanup.view")),
+):
+    return fetch_duplicate_listing_summary(db)
+
+
+@app.get("/internal/v1/hqa/data-check/duplicates")
+def hqa_duplicate_listing_groups(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    marketplace: str | None = None,
+    listing_id: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.data_cleanup.view")),
+):
+    try:
+        return fetch_duplicate_listing_groups(
+            db,
+            page=page,
+            page_size=page_size,
+            marketplace=marketplace,
+            listing_id=listing_id,
+            status=status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/internal/v1/hqa/data-check/duplicates/cleanup")
+def hqa_duplicate_listing_cleanup(
+    payload: DuplicateCleanupRequest,
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.data_cleanup.execute")),
+):
+    if payload.confirmation != "DELETE_DUPLICATE_LISTINGS":
+        raise HTTPException(status_code=400, detail="Invalid confirmation token")
+    try:
+        return cleanup_duplicate_listings(db)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/internal/v1/hqa/dashboard/filter-options")
