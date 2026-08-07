@@ -81,85 +81,54 @@ const state = {
     },
     dashboard: {
       loading: false,
+      sellerStatsLoading: false,
       loadingOptions: false,
       isExporting: false,
       error: '',
+      sellerStatsError: '',
       optionsError: '',
       sectionErrors: {},
+      sellerStats: {
+        totalSellers: null,
+        dateFrom: '',
+        dateTo: '',
+        appliedDateFrom: '',
+        appliedDateTo: '',
+      },
       filterOptions: {
         marketplaces: [],
         brands: [],
         models: [],
-        statuses: [],
-        category_names: [],
-        buying_options: [],
-        sellers: [],
         currencies: [],
       },
-      appliedSellerFilters: {
+      appliedFilters: {
         keyword: '',
-        marketplaces: [],
-        brands: [],
-        models: [],
-        statuses: [],
-        categoryNames: [],
-        buyingOptions: [],
-        sellers: [],
+        marketplace: '',
+        brand: '',
+        model: '',
         currency: '',
         dateFrom: '',
         dateTo: '',
-      },
-      draftSellerFilters: {
-        keyword: '',
-        marketplaces: [],
-        brands: [],
-        models: [],
-        statuses: [],
-        categoryNames: [],
-        buyingOptions: [],
-        sellers: [],
-        currency: '',
-        dateFrom: '',
-        dateTo: '',
-      },
-      appliedPriceFilters: {
-        keyword: '',
-        marketplaces: [],
-        brands: [],
-        models: [],
-        statuses: [],
-        categoryNames: [],
-        buyingOptions: [],
-        sellers: [],
-        currency: '',
-        dateFrom: '',
-        dateTo: '',
-        granularity: 'month',
+        groupBy: 'month',
         minPrice: '',
         maxPrice: '',
       },
-      draftPriceFilters: {
+      draftFilters: {
         keyword: '',
-        marketplaces: [],
-        brands: [],
-        models: [],
-        statuses: [],
-        categoryNames: [],
-        buyingOptions: [],
-        sellers: [],
+        marketplace: '',
+        brand: '',
+        model: '',
         currency: '',
         dateFrom: '',
         dateTo: '',
-        granularity: 'month',
+        groupBy: 'month',
         minPrice: '',
         maxPrice: '',
       },
-      sellersSummary: null,
-      sellersTrend: { points: [] },
-      topSellers: { items: [] },
-      pricesSummary: null,
-      pricesTrend: { points: [] },
-      pricesByKeyword: { items: [] },
+      summary: null,
+      sellerTrend: { points: [] },
+      priceTrend: { points: [] },
+      priceComparison: { compare_by: 'brand', items: [] },
       alerts: { alerts: [] },
     },
     dataCheck: {
@@ -590,48 +559,65 @@ function renderHqaMainTabVisibility() {
   dataCheckView.hidden = !isDataCheck;
 }
 
-function appendDashboardListParams(params, key, values) {
-  (values || []).forEach((value) => {
-    const normalized = String(value || '').trim();
-    if (!normalized) return;
-    params.append(key, normalized);
-  });
-}
-
 function buildDashboardCommonParams(filters) {
   const params = new URLSearchParams();
   if (filters.keyword) params.set('keyword', filters.keyword.trim());
+  if (filters.marketplace) params.append('marketplace', filters.marketplace.trim());
+  if (filters.brand) params.append('brand', filters.brand.trim());
+  if (filters.model) params.append('model', filters.model.trim());
   if (filters.currency) params.set('currency', filters.currency.trim());
   if (filters.dateFrom) params.set('date_from', filters.dateFrom);
   if (filters.dateTo) params.set('date_to', filters.dateTo);
-  appendDashboardListParams(params, 'marketplace', filters.marketplaces || []);
-  appendDashboardListParams(params, 'brand', filters.brands || []);
-  appendDashboardListParams(params, 'model', filters.models || []);
-  appendDashboardListParams(params, 'status', filters.statuses || []);
-  appendDashboardListParams(params, 'category_name', filters.categoryNames || []);
-  appendDashboardListParams(params, 'buying_option', filters.buyingOptions || []);
-  appendDashboardListParams(params, 'seller', filters.sellers || []);
-  return params;
-}
-
-function buildDashboardSellerParams() {
-  return buildDashboardCommonParams(state.hqa.dashboard.appliedSellerFilters);
-}
-
-function buildDashboardPriceParams() {
-  const filters = state.hqa.dashboard.appliedPriceFilters;
-  const params = buildDashboardCommonParams(filters);
   if (filters.minPrice !== '') params.set('min_price', String(filters.minPrice).trim());
   if (filters.maxPrice !== '') params.set('max_price', String(filters.maxPrice).trim());
-  if (filters.granularity) params.set('granularity', filters.granularity);
+  if (filters.groupBy) params.set('group_by', filters.groupBy);
   return params;
+}
+
+function buildDashboardAppliedParams() {
+  return buildDashboardCommonParams(state.hqa.dashboard.appliedFilters);
+}
+
+function buildDashboardSellerStatsParams(filters) {
+  const params = new URLSearchParams();
+  if (filters.dateFrom) params.set('date_from', filters.dateFrom);
+  if (filters.dateTo) params.set('date_to', filters.dateTo);
+  return params;
+}
+
+async function loadHqaDashboardSellerStats() {
+  state.hqa.dashboard.sellerStatsLoading = true;
+  state.hqa.dashboard.sellerStatsError = '';
+  try {
+    const filters = state.hqa.dashboard.sellerStats;
+    const params = buildDashboardSellerStatsParams(filters).toString();
+    const suffix = params ? `?${params}` : '';
+    const payload = await api(`/hqa/dashboard/sellers/total${suffix}`);
+    const totalSellers = Object.prototype.hasOwnProperty.call(payload || {}, 'total_sellers')
+      ? Number(payload.total_sellers)
+      : null;
+    state.hqa.dashboard.sellerStats = {
+      ...state.hqa.dashboard.sellerStats,
+      totalSellers: Number.isFinite(totalSellers) ? totalSellers : null,
+      appliedDateFrom: payload.date_from || '',
+      appliedDateTo: payload.date_to || '',
+    };
+  } catch (error) {
+    state.hqa.dashboard.sellerStatsError = error.message || 'Could not load total sellers.';
+    state.hqa.dashboard.sellerStats = {
+      ...state.hqa.dashboard.sellerStats,
+      totalSellers: null,
+    };
+  } finally {
+    state.hqa.dashboard.sellerStatsLoading = false;
+  }
 }
 
 async function loadHqaDashboardFilterOptions() {
   state.hqa.dashboard.loadingOptions = true;
   state.hqa.dashboard.optionsError = '';
   try {
-    const draft = state.hqa.dashboard.draftSellerFilters;
+    const draft = state.hqa.dashboard.draftFilters;
     const params = buildDashboardCommonParams(draft);
     const payload = await api(`/hqa/dashboard/filter-options?${params.toString()}`);
     state.hqa.dashboard.filterOptions = payload.options || {};
@@ -645,20 +631,15 @@ async function loadHqaDashboardFilterOptions() {
 async function loadHqaDashboardData() {
   state.hqa.dashboard.loading = true;
   state.hqa.dashboard.error = '';
-
-  const sellerParams = buildDashboardSellerParams().toString();
-  const sellerSuffix = sellerParams ? `?${sellerParams}` : '';
-  const priceParams = buildDashboardPriceParams().toString();
-  const priceSuffix = priceParams ? `?${priceParams}` : '';
+  const params = buildDashboardAppliedParams().toString();
+  const suffix = params ? `?${params}` : '';
 
   const requests = [
-    { key: 'sellersSummary', path: `/hqa/dashboard/sellers/summary${sellerSuffix}` },
-    { key: 'sellersTrend', path: `/hqa/dashboard/sellers/trend${sellerSuffix}` },
-    { key: 'topSellers', path: `/hqa/dashboard/sellers/top${sellerSuffix}` },
-    { key: 'pricesSummary', path: `/hqa/dashboard/prices/summary${priceSuffix}` },
-    { key: 'pricesTrend', path: `/hqa/dashboard/prices/trend${priceSuffix}` },
-    { key: 'pricesByKeyword', path: `/hqa/dashboard/prices/by-keyword${priceSuffix}` },
-    { key: 'alerts', path: `/hqa/dashboard/alerts${priceSuffix}` },
+    { key: 'summary', path: `/hqa/dashboard/summary${suffix}` },
+    { key: 'sellerTrend', path: `/hqa/dashboard/seller-trend${suffix}` },
+    { key: 'priceTrend', path: `/hqa/dashboard/price-trend${suffix}` },
+    { key: 'priceComparison', path: `/hqa/dashboard/price-comparison${suffix}` },
+    { key: 'alerts', path: `/hqa/dashboard/alerts${suffix}` },
   ];
 
   const results = await Promise.allSettled(requests.map((request) => api(request.path)));
@@ -705,9 +686,9 @@ function buildSimpleLineChart({ title, points, lines }) {
     return `<g><line x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" stroke="#E2E8F0" stroke-width="1" /><text x="${padLeft - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="#64748B">${Math.round(value)}</text></g>`;
   }).join('');
 
-  const monthTicks = points.map((point, index) => {
+  const periodTicks = points.map((point, index) => {
     const x = padLeft + (xStep * index);
-    return `<text x="${x}" y="${height - 20}" text-anchor="middle" font-size="11" fill="#64748B">${escapeHtml(point.month || '-')}</text>`;
+    return `<text x="${x}" y="${height - 20}" text-anchor="middle" font-size="11" fill="#64748B">${escapeHtml(point.period || '-')}</text>`;
   }).join('');
 
   const lineSvg = lines.map((line) => {
@@ -720,7 +701,7 @@ function buildSimpleLineChart({ title, points, lines }) {
       const x = padLeft + (xStep * index);
       const value = Number(point[line.key] || 0);
       const y = yScale(value);
-      return `<circle cx="${x}" cy="${y}" r="4" fill="${line.color}"><title>${escapeHtml(point.month || '-')} ${line.label}: ${value.toLocaleString()}</title></circle>`;
+      return `<circle cx="${x}" cy="${y}" r="4" fill="${line.color}"><title>${escapeHtml(point.period || '-')} ${line.label}: ${value.toLocaleString()}</title></circle>`;
     }).join('');
     return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="2.5"/>${circles}`;
   }).join('');
@@ -734,7 +715,7 @@ function buildSimpleLineChart({ title, points, lines }) {
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)} chart">
         ${yTicks}
         ${lineSvg}
-        ${monthTicks}
+        ${periodTicks}
       </svg>
     </article>`;
 }
@@ -748,15 +729,29 @@ function renderHqaDashboard() {
   const dashboardView = document.getElementById('hqa-dashboard-view');
   if (!dashboardView) return;
   const data = state.hqa.dashboard;
-  const sellerSummary = data.sellersSummary || {};
-  const priceSummary = data.pricesSummary || {};
-  const keywordItems = data.pricesByKeyword?.items || [];
+  const sellerStats = data.sellerStats || {};
+  const sellerSummary = data.summary?.seller_analytics || {};
+  const priceSummary = data.summary?.price_analytics || {};
+  const comparisonItems = data.priceComparison?.items || [];
   const alertItems = data.alerts?.alerts || [];
   const options = data.filterOptions || {};
 
-  const dashboardSelectOptions = (items, selected = []) => {
-    const selectedSet = new Set(selected || []);
-    return (items || []).map((item) => `<option value="${escapeHtml(item)}" ${selectedSet.has(item) ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('');
+  const dashboardSelectOptions = (items, selected = '') => {
+    const normalized = String(selected || '');
+    return (items || []).map((item) => `<option value="${escapeHtml(item)}" ${item === normalized ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('');
+  };
+
+  const renderAlert = (alert) => {
+    const severity = String(alert?.severity || '').toLowerCase();
+    const severityLabel = severity === 'critical' ? 'CRITICAL' : severity === 'warning' ? 'WARNING' : 'INFO';
+    const toneClass = severity === 'critical' ? 'dashboard-alert-critical' : severity === 'warning' ? 'dashboard-alert-warning' : 'dashboard-alert-info';
+    const previousAvg = Number(alert?.previous_avg_price || 0);
+    const currentAvg = Number(alert?.current_avg_price || 0);
+    const changePercent = Number(alert?.change_percent || 0);
+    const priceChangeLine = previousAvg > 0 || currentAvg > 0
+      ? `<div class="dashboard-alert-detail">${formatRecordCount(previousAvg)} -> ${formatRecordCount(currentAvg)} (${changePercent.toFixed(2)}%)</div>`
+      : '';
+    return `<li class="dashboard-alert-item ${toneClass}"><div><strong>${escapeHtml(severityLabel)}</strong> ${escapeHtml(alert?.message || '')}</div>${priceChangeLine}</li>`;
   };
 
   dashboardView.innerHTML = `
@@ -765,88 +760,97 @@ function renderHqaDashboard() {
       <div class="dashboard-export-actions">
         <button type="button" id="dashboard-drilldown" ${data.loading ? 'disabled' : ''}>Drill-down to Listings</button>
         <select id="dashboard-export-dataset" ${data.loading ? 'disabled' : ''}>
-          <option value="sellers_summary">Sellers summary</option>
-          <option value="sellers_trend">Sellers trend</option>
-          <option value="sellers_top">Top sellers</option>
-          <option value="prices_summary">Prices summary</option>
-          <option value="prices_trend">Prices trend</option>
-          <option value="prices_by_keyword">Prices by keyword</option>
+          <option value="summary">Summary</option>
+          <option value="seller_trend">Seller trend</option>
+          <option value="price_trend">Price trend</option>
+          <option value="price_comparison">Price comparison</option>
           <option value="alerts">Alerts</option>
         </select>
         <button type="button" id="dashboard-export" ${(data.loading || data.isExporting) ? 'disabled' : ''}>${data.isExporting ? 'Exporting...' : 'Export CSV'}</button>
       </div>
     </div>
+    <div class="panel dashboard-subpanel">
+      <h3>THONG KE NGUOI BAN</h3>
+      <form id="dashboard-seller-stats-filters" class="dashboard-seller-stats-filters">
+        <label class="form-field"><span>Date from</span><input id="dashboard-seller-stats-date-from" type="date" value="${escapeHtml(sellerStats.dateFrom || '')}"></label>
+        <label class="form-field"><span>Date to</span><input id="dashboard-seller-stats-date-to" type="date" value="${escapeHtml(sellerStats.dateTo || '')}"></label>
+        <button type="submit" ${data.sellerStatsLoading ? 'disabled' : ''}>${data.sellerStatsLoading ? 'Applying...' : 'Apply'}</button>
+        <button type="button" id="dashboard-seller-stats-reset" ${data.sellerStatsLoading ? 'disabled' : ''}>Reset</button>
+      </form>
+      ${data.sellerStatsError ? `<div class="error">${escapeHtml(data.sellerStatsError)}</div>` : ''}
+      <div class="metrics dashboard-metrics dashboard-seller-stats-metrics">
+        <article class="metric-card">
+          <span>Total Sellers</span>
+          <strong>${sellerStats.totalSellers === null ? '-' : formatRecordCount(sellerStats.totalSellers)}</strong>
+          <small>Nguoi ban trong database</small>
+        </article>
+      </div>
+    </div>
     <form id="dashboard-filters" class="hqa-filter-grid dashboard-filter-grid" ${data.loading ? 'data-loading="true"' : ''}>
-      <h3 class="dashboard-filter-title">Seller Filters</h3>
-      <input id="dashboard-seller-keyword" placeholder="Keyword" value="${escapeHtml(data.draftSellerFilters.keyword)}">
-      <input id="dashboard-seller-currency" placeholder="Currency (USD...)" value="${escapeHtml(data.draftSellerFilters.currency)}">
-      <label class="form-field"><span>Date from</span><input id="dashboard-seller-date-from" type="date" value="${escapeHtml(data.draftSellerFilters.dateFrom)}"></label>
-      <label class="form-field"><span>Date to</span><input id="dashboard-seller-date-to" type="date" value="${escapeHtml(data.draftSellerFilters.dateTo)}"></label>
-      <select id="dashboard-seller-marketplace" multiple size="4">${dashboardSelectOptions(options.marketplaces, data.draftSellerFilters.marketplaces)}</select>
-      <select id="dashboard-seller-brand" multiple size="4">${dashboardSelectOptions(options.brands, data.draftSellerFilters.brands)}</select>
-      <select id="dashboard-seller-model" multiple size="4">${dashboardSelectOptions(options.models, data.draftSellerFilters.models)}</select>
-      <select id="dashboard-seller-status" multiple size="4">${dashboardSelectOptions(options.statuses, data.draftSellerFilters.statuses)}</select>
-      <select id="dashboard-seller-category" multiple size="4">${dashboardSelectOptions(options.category_names, data.draftSellerFilters.categoryNames)}</select>
-      <select id="dashboard-seller-buying" multiple size="4">${dashboardSelectOptions(options.buying_options, data.draftSellerFilters.buyingOptions)}</select>
-      <select id="dashboard-seller-seller" multiple size="4">${dashboardSelectOptions(options.sellers, data.draftSellerFilters.sellers)}</select>
-
-      <h3 class="dashboard-filter-title">Price Filters</h3>
-      <input id="dashboard-price-keyword" placeholder="Keyword" value="${escapeHtml(data.draftPriceFilters.keyword)}">
-      <input id="dashboard-price-currency" placeholder="Currency (USD...)" value="${escapeHtml(data.draftPriceFilters.currency)}">
-      <label class="form-field"><span>Date from</span><input id="dashboard-price-date-from" type="date" value="${escapeHtml(data.draftPriceFilters.dateFrom)}"></label>
-      <label class="form-field"><span>Date to</span><input id="dashboard-price-date-to" type="date" value="${escapeHtml(data.draftPriceFilters.dateTo)}"></label>
-      <label class="form-field"><span>Min price</span><input id="dashboard-price-min" type="text" value="${escapeHtml(data.draftPriceFilters.minPrice)}"></label>
-      <label class="form-field"><span>Max price</span><input id="dashboard-price-max" type="text" value="${escapeHtml(data.draftPriceFilters.maxPrice)}"></label>
-      <select id="dashboard-price-granularity">
-        <option value="day" ${data.draftPriceFilters.granularity === 'day' ? 'selected' : ''}>Day</option>
-        <option value="week" ${data.draftPriceFilters.granularity === 'week' ? 'selected' : ''}>Week</option>
-        <option value="month" ${data.draftPriceFilters.granularity === 'month' ? 'selected' : ''}>Month</option>
-      </select>
-      <div class="filter-actions"><button type="submit">Apply dashboard filters</button><button type="button" id="dashboard-reset">Reset</button></div>
+      <h3 class="dashboard-filter-title">Dashboard Filters</h3>
+      <label class="form-field"><span>Keyword</span><input id="dashboard-keyword" placeholder="Keyword" value="${escapeHtml(data.draftFilters.keyword)}"></label>
+      <label class="form-field"><span>Marketplace</span><select id="dashboard-marketplace"><option value="">All marketplaces</option>${dashboardSelectOptions(options.marketplaces, data.draftFilters.marketplace)}</select></label>
+      <label class="form-field"><span>Brand</span><select id="dashboard-brand"><option value="">All brands</option>${dashboardSelectOptions(options.brands, data.draftFilters.brand)}</select></label>
+      <label class="form-field"><span>Model</span><select id="dashboard-model"><option value="">All models</option>${dashboardSelectOptions(options.models, data.draftFilters.model)}</select></label>
+      <label class="form-field"><span>Currency</span><select id="dashboard-currency"><option value="">Auto</option>${dashboardSelectOptions(options.currencies, data.draftFilters.currency)}</select></label>
+      <label class="form-field"><span>Date from</span><input id="dashboard-date-from" type="date" value="${escapeHtml(data.draftFilters.dateFrom)}"></label>
+      <label class="form-field"><span>Date to</span><input id="dashboard-date-to" type="date" value="${escapeHtml(data.draftFilters.dateTo)}"></label>
+      <label class="form-field"><span>Time grouping</span><select id="dashboard-group-by">
+        <option value="day" ${data.draftFilters.groupBy === 'day' ? 'selected' : ''}>Day</option>
+        <option value="week" ${data.draftFilters.groupBy === 'week' ? 'selected' : ''}>Week</option>
+        <option value="month" ${data.draftFilters.groupBy === 'month' ? 'selected' : ''}>Month</option>
+      </select></label>
+      <label class="form-field"><span>Min price</span><input id="dashboard-min-price" type="text" value="${escapeHtml(data.draftFilters.minPrice)}"></label>
+      <label class="form-field"><span>Max price</span><input id="dashboard-max-price" type="text" value="${escapeHtml(data.draftFilters.maxPrice)}"></label>
+      <div class="filter-actions"><button type="submit">Apply filters</button><button type="button" id="dashboard-reset">Reset</button></div>
       ${data.optionsError ? `<div class="error">${escapeHtml(data.optionsError)}</div>` : ''}
     </form>
     ${data.error ? `<div class="error">${escapeHtml(data.error)}</div>` : ''}
-    <div class="metrics dashboard-metrics">
-      ${metric('Total listings', sellerSummary.total_listings || 0)}
-      ${metric('Total sellers', sellerSummary.total_sellers || 0)}
-      ${metric('New sellers', sellerSummary.new_sellers || 0)}
-      ${metric('Active listings', sellerSummary.active_listings || 0)}
-      ${metric('Price sample', priceSummary.sample_size || 0)}
-      ${metric('Avg price', priceSummary.avg_price || 0)}
-      ${metric('Median price', priceSummary.median_price || 0)}
-      ${metric('Min price', priceSummary.min_price || 0)}
-      ${metric('Max price', priceSummary.max_price || 0)}
-      ${metric('Currency', priceSummary.currency || 'unknown')}
-    </div>
-    <div class="dashboard-grid">
+    <div class="panel dashboard-subpanel">
+      <h3>Seller Analytics</h3>
+      <div class="metrics dashboard-metrics">
+        ${metric('Total Sellers', sellerSummary.total_sellers || 0)}
+        ${metric('New Sellers', sellerSummary.new_sellers || 0)}
+        ${metric('Active Sellers', sellerSummary.active_sellers || 0)}
+        ${metric('Total Listings', sellerSummary.total_listings || 0)}
+      </div>
       ${buildSimpleLineChart({
-        title: 'Price trend',
-        points: data.pricesTrend?.points || [],
+        title: 'Seller Trend',
+        points: data.sellerTrend?.points || [],
         lines: [
-          { key: 'avg_price', label: 'Avg', color: '#2563EB' },
-          { key: 'median_price', label: 'Median', color: '#0F766E' },
-          { key: 'max_price', label: 'Max', color: '#D97706' },
+          { key: 'total_sellers', label: 'Total Sellers', color: '#7C3AED' },
+          { key: 'new_sellers', label: 'New Sellers', color: '#0EA5E9' },
         ],
       })}
+    </div>
+    <div class="panel dashboard-subpanel">
+      <h3>Price Analytics</h3>
+      <div class="metrics dashboard-metrics">
+        ${metric('Average Price', priceSummary.avg_price || 0)}
+        ${metric('Lowest Price', priceSummary.min_price || 0)}
+        ${metric('Highest Price', priceSummary.max_price || 0)}
+        ${metric('Price Sample', priceSummary.price_sample || priceSummary.sample_size || 0)}
+        ${metric('Currency', priceSummary.currency || 'unknown')}
+      </div>
       ${buildSimpleLineChart({
-        title: 'Seller trend',
-        points: data.sellersTrend?.points || [],
-        lines: [{ key: 'seller_count', label: 'Sellers', color: '#7C3AED' }],
+        title: 'Price Trend',
+        points: data.priceTrend?.points || [],
+        lines: [
+          { key: 'avg_price', label: 'Average Price', color: '#2563EB' },
+          { key: 'min_price', label: 'Lowest Price', color: '#0F766E' },
+          { key: 'max_price', label: 'Highest Price', color: '#D97706' },
+        ],
       })}
     </div>
     <div class="panel dashboard-subpanel">
-      <h3>Prices by keyword</h3>
-      <div class="table-wrap"><table><thead><tr><th>Keyword</th><th>Count</th><th>Share %</th><th>Avg</th><th>Min</th><th>Max</th></tr></thead><tbody>${keywordItems.map((item) => `<tr><td>${escapeHtml(item.keyword)}</td><td>${formatRecordCount(item.count || 0)}</td><td>${Number(item.share_pct || 0).toFixed(2)}%</td><td>${formatRecordCount(item.avg_price || 0)}</td><td>${formatRecordCount(item.min_price || 0)}</td><td>${formatRecordCount(item.max_price || 0)}</td></tr>`).join('')}</tbody></table></div>
+      <h3>Price Comparison (${escapeHtml(data.priceComparison?.compare_by || 'brand')})</h3>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sample</th><th>Average Price</th><th>Lowest Price</th><th>Highest Price</th></tr></thead><tbody>${comparisonItems.map((item) => `<tr><td>${escapeHtml(item.name || item.keyword || '-')}</td><td>${formatRecordCount(item.sample_size || item.count || 0)}</td><td>${formatRecordCount(item.avg_price || 0)}</td><td>${formatRecordCount(item.min_price || 0)}</td><td>${formatRecordCount(item.max_price || 0)}</td></tr>`).join('')}</tbody></table></div>
     </div>
     <div class="panel dashboard-subpanel">
-      <h3>Alerts</h3>
+      <h3>Market Alerts</h3>
       ${alertItems.length
-        ? `<ul class="dashboard-alerts">${alertItems.map((alert) => `<li><strong>${escapeHtml(alert.type)}</strong>: ${escapeHtml(alert.message || '')}</li>`).join('')}</ul>`
-        : '<div class="empty-state">No alerts in the selected range.</div>'}
-    </div>
-    <div class="panel dashboard-subpanel">
-      <h3>Top sellers</h3>
-      <div class="table-wrap"><table><thead><tr><th>Seller</th><th>Listings</th><th>Unique listings</th><th>Avg price</th><th>Min</th><th>Max</th></tr></thead><tbody>${(data.topSellers?.items || []).map((item) => `<tr><td>${escapeHtml(item.seller || '-')}</td><td>${formatRecordCount(item.listing_count || 0)}</td><td>${formatRecordCount(item.unique_listings || 0)}</td><td>${formatRecordCount(item.avg_price || 0)}</td><td>${formatRecordCount(item.min_price || 0)}</td><td>${formatRecordCount(item.max_price || 0)}</td></tr>`).join('')}</tbody></table></div>
+        ? `<ul class="dashboard-alerts">${alertItems.map((alert) => renderAlert(alert)).join('')}</ul>`
+        : '<div class="empty-state">No significant market changes detected.</div>'}
     </div>`;
 }
 
@@ -2279,7 +2283,8 @@ async function renderHqa(content, options = {}) {
   renderAllListingsToast();
 
   if (state.hqa.mainTab === 'dashboard') {
-    if (reloadData || !state.hqa.dashboard.sellersSummary) {
+    if (reloadData || !state.hqa.dashboard.summary) {
+      await loadHqaDashboardSellerStats();
       await loadHqaDashboardFilterOptions();
       await loadHqaDashboardData();
     }
@@ -2318,6 +2323,7 @@ async function renderHqa(content, options = {}) {
     refreshDataButton.dataset.bound = 'true';
     refreshDataButton.addEventListener('click', async () => {
       if (state.hqa.mainTab === 'dashboard') {
+        await loadHqaDashboardSellerStats();
         await loadHqaDashboardData();
         renderHqaDashboard();
         return;
@@ -2420,98 +2426,133 @@ async function renderHqa(content, options = {}) {
   if (dashboardForm && !dashboardForm.dataset.bound) {
     dashboardForm.dataset.bound = 'true';
 
-    const selectedValues = (id) => Array.from(document.getElementById(id)?.selectedOptions || []).map((option) => option.value);
-
-    const snapshotDashboardSellerFilters = () => ({
-      keyword: document.getElementById('dashboard-seller-keyword')?.value.trim() || '',
-      currency: document.getElementById('dashboard-seller-currency')?.value.trim() || '',
-      dateFrom: document.getElementById('dashboard-seller-date-from')?.value || '',
-      dateTo: document.getElementById('dashboard-seller-date-to')?.value || '',
-      marketplaces: selectedValues('dashboard-seller-marketplace'),
-      brands: selectedValues('dashboard-seller-brand'),
-      models: selectedValues('dashboard-seller-model'),
-      statuses: selectedValues('dashboard-seller-status'),
-      categoryNames: selectedValues('dashboard-seller-category'),
-      buyingOptions: selectedValues('dashboard-seller-buying'),
-      sellers: selectedValues('dashboard-seller-seller'),
-    });
-
-    const snapshotDashboardPriceFilters = () => ({
-      ...snapshotDashboardSellerFilters(),
-      keyword: document.getElementById('dashboard-price-keyword')?.value.trim() || '',
-      currency: document.getElementById('dashboard-price-currency')?.value.trim() || '',
-      dateFrom: document.getElementById('dashboard-price-date-from')?.value || '',
-      dateTo: document.getElementById('dashboard-price-date-to')?.value || '',
-      granularity: document.getElementById('dashboard-price-granularity')?.value || 'month',
-      minPrice: document.getElementById('dashboard-price-min')?.value.trim() || '',
-      maxPrice: document.getElementById('dashboard-price-max')?.value.trim() || '',
+    const snapshotDashboardFilters = () => ({
+      keyword: document.getElementById('dashboard-keyword')?.value.trim() || '',
+      marketplace: document.getElementById('dashboard-marketplace')?.value.trim() || '',
+      brand: document.getElementById('dashboard-brand')?.value.trim() || '',
+      model: document.getElementById('dashboard-model')?.value.trim() || '',
+      currency: document.getElementById('dashboard-currency')?.value.trim() || '',
+      dateFrom: document.getElementById('dashboard-date-from')?.value || '',
+      dateTo: document.getElementById('dashboard-date-to')?.value || '',
+      groupBy: document.getElementById('dashboard-group-by')?.value || 'month',
+      minPrice: document.getElementById('dashboard-min-price')?.value.trim() || '',
+      maxPrice: document.getElementById('dashboard-max-price')?.value.trim() || '',
     });
 
     dashboardForm.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const sellerFilters = snapshotDashboardSellerFilters();
-      const priceFilters = snapshotDashboardPriceFilters();
-      if (sellerFilters.dateFrom && sellerFilters.dateTo && sellerFilters.dateFrom > sellerFilters.dateTo) {
-        state.hqa.dashboard.error = 'Seller filter date range is invalid.';
+      const nextFilters = snapshotDashboardFilters();
+      if (nextFilters.dateFrom && nextFilters.dateTo && nextFilters.dateFrom > nextFilters.dateTo) {
+        state.hqa.dashboard.error = 'Dashboard filter date range is invalid.';
         renderHqaDashboard();
         return;
       }
-      if (priceFilters.dateFrom && priceFilters.dateTo && priceFilters.dateFrom > priceFilters.dateTo) {
-        state.hqa.dashboard.error = 'Price filter date range is invalid.';
-        renderHqaDashboard();
-        return;
-      }
-      const parsedMinPrice = parseNonNegativeNumber(priceFilters.minPrice);
+      const parsedMinPrice = parseNonNegativeNumber(nextFilters.minPrice);
       if (!parsedMinPrice.ok) {
         state.hqa.dashboard.error = parsedMinPrice.message;
         renderHqaDashboard();
         return;
       }
-      const parsedMaxPrice = parseNonNegativeNumber(priceFilters.maxPrice);
+      const parsedMaxPrice = parseNonNegativeNumber(nextFilters.maxPrice);
       if (!parsedMaxPrice.ok) {
         state.hqa.dashboard.error = parsedMaxPrice.message;
         renderHqaDashboard();
         return;
       }
-      priceFilters.minPrice = parsedMinPrice.value;
-      priceFilters.maxPrice = parsedMaxPrice.value;
-      if (priceFilters.minPrice !== '' && priceFilters.maxPrice !== '' && Number(priceFilters.minPrice) > Number(priceFilters.maxPrice)) {
+      nextFilters.minPrice = parsedMinPrice.value;
+      nextFilters.maxPrice = parsedMaxPrice.value;
+      if (nextFilters.minPrice !== '' && nextFilters.maxPrice !== '' && Number(nextFilters.minPrice) > Number(nextFilters.maxPrice)) {
         state.hqa.dashboard.error = 'Min price must be less than or equal to max price.';
         renderHqaDashboard();
         return;
       }
 
       state.hqa.dashboard.error = '';
-      state.hqa.dashboard.draftSellerFilters = sellerFilters;
-      state.hqa.dashboard.appliedSellerFilters = sellerFilters;
-      state.hqa.dashboard.draftPriceFilters = priceFilters;
-      state.hqa.dashboard.appliedPriceFilters = priceFilters;
+      state.hqa.dashboard.draftFilters = nextFilters;
+      state.hqa.dashboard.appliedFilters = nextFilters;
       await loadHqaDashboardFilterOptions();
       await loadHqaDashboardData();
       renderHqaDashboard();
       await renderHqa(content, { reloadData: false });
     });
 
+    const brandSelect = document.getElementById('dashboard-brand');
+    if (brandSelect && !brandSelect.dataset.bound) {
+      brandSelect.dataset.bound = 'true';
+      brandSelect.addEventListener('change', async () => {
+        const draftFilters = {
+          ...state.hqa.dashboard.draftFilters,
+          brand: brandSelect.value.trim(),
+          model: '',
+        };
+        state.hqa.dashboard.draftFilters = draftFilters;
+        await loadHqaDashboardFilterOptions();
+        renderHqaDashboard();
+        await renderHqa(content, { reloadData: false });
+      });
+    }
+
     dashboardForm.addEventListener('click', async (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
       if (target.id !== 'dashboard-reset') return;
-      const emptySeller = {
-        keyword: '', marketplaces: [], brands: [], models: [], statuses: [], categoryNames: [], buyingOptions: [], sellers: [], currency: '', dateFrom: '', dateTo: '',
-      };
-      const emptyPrice = {
-        ...emptySeller,
-        granularity: 'month',
+      const emptyFilters = {
+        keyword: '',
+        marketplace: '',
+        brand: '',
+        model: '',
+        currency: '',
+        dateFrom: '',
+        dateTo: '',
+        groupBy: 'month',
         minPrice: '',
         maxPrice: '',
       };
       state.hqa.dashboard.error = '';
-      state.hqa.dashboard.draftSellerFilters = emptySeller;
-      state.hqa.dashboard.appliedSellerFilters = emptySeller;
-      state.hqa.dashboard.draftPriceFilters = emptyPrice;
-      state.hqa.dashboard.appliedPriceFilters = emptyPrice;
+      state.hqa.dashboard.draftFilters = emptyFilters;
+      state.hqa.dashboard.appliedFilters = emptyFilters;
       await loadHqaDashboardFilterOptions();
       await loadHqaDashboardData();
+      renderHqaDashboard();
+      await renderHqa(content, { reloadData: false });
+    });
+  }
+
+  const sellerStatsForm = document.getElementById('dashboard-seller-stats-filters');
+  if (sellerStatsForm && !sellerStatsForm.dataset.bound) {
+    sellerStatsForm.dataset.bound = 'true';
+    sellerStatsForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const dateFrom = document.getElementById('dashboard-seller-stats-date-from')?.value || '';
+      const dateTo = document.getElementById('dashboard-seller-stats-date-to')?.value || '';
+      if (dateFrom && dateTo && dateFrom > dateTo) {
+        state.hqa.dashboard.sellerStatsError = 'Date range is invalid.';
+        renderHqaDashboard();
+        await renderHqa(content, { reloadData: false });
+        return;
+      }
+      state.hqa.dashboard.sellerStatsError = '';
+      state.hqa.dashboard.sellerStats = {
+        ...state.hqa.dashboard.sellerStats,
+        dateFrom,
+        dateTo,
+      };
+      await loadHqaDashboardSellerStats();
+      renderHqaDashboard();
+      await renderHqa(content, { reloadData: false });
+    });
+
+    sellerStatsForm.addEventListener('click', async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.id !== 'dashboard-seller-stats-reset') return;
+      state.hqa.dashboard.sellerStatsError = '';
+      state.hqa.dashboard.sellerStats = {
+        ...state.hqa.dashboard.sellerStats,
+        dateFrom: '',
+        dateTo: '',
+      };
+      await loadHqaDashboardSellerStats();
       renderHqaDashboard();
       await renderHqa(content, { reloadData: false });
     });
@@ -2524,13 +2565,11 @@ async function renderHqa(content, options = {}) {
       state.hqa.dashboard.isExporting = true;
       renderHqaDashboard();
       try {
-        const dataset = document.getElementById('dashboard-export-dataset')?.value || 'sellers_summary';
-        const params = dataset.startsWith('prices') || dataset === 'alerts'
-          ? buildDashboardPriceParams()
-          : buildDashboardSellerParams();
+        const dataset = document.getElementById('dashboard-export-dataset')?.value || 'summary';
+        const params = buildDashboardAppliedParams();
         params.set('dataset', dataset);
-        if (state.hqa.dashboard.appliedPriceFilters.granularity) {
-          params.set('granularity', state.hqa.dashboard.appliedPriceFilters.granularity);
+        if (state.hqa.dashboard.appliedFilters.groupBy) {
+          params.set('granularity', state.hqa.dashboard.appliedFilters.groupBy);
         }
         await downloadCsv(`/hqa/dashboard/export?${params.toString()}`, `hqa_dashboard_${dataset}.csv`);
       } catch (error) {
@@ -2546,17 +2585,17 @@ async function renderHqa(content, options = {}) {
   if (dashboardDrilldownButton && !dashboardDrilldownButton.dataset.bound) {
     dashboardDrilldownButton.dataset.bound = 'true';
     dashboardDrilldownButton.addEventListener('click', async () => {
-      const filters = state.hqa.dashboard.appliedPriceFilters;
+      const filters = state.hqa.dashboard.appliedFilters;
       const mapped = {
         fromDate: filters.dateFrom || '',
         toDate: filters.dateTo || '',
-        marketplace: filters.marketplaces?.[0] || '',
-        brand: filters.brands?.[0] || '',
-        model: filters.models?.[0] || '',
+        marketplace: filters.marketplace || '',
+        brand: filters.brand || '',
+        model: filters.model || '',
         conditions: [],
-        statuses: filters.statuses || [],
-        categoryNames: filters.categoryNames || [],
-        buyingOptions: filters.buyingOptions || [],
+        statuses: [],
+        categoryNames: [],
+        buyingOptions: [],
         sortCollected: 'newest',
         minPrice: filters.minPrice || '',
         maxPrice: filters.maxPrice || '',

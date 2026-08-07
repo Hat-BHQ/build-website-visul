@@ -1174,6 +1174,23 @@ def test_hqa_dashboard_filter_options_returns_db_driven_options(client):
     assert payload["options"]["sellers"]
 
 
+def test_hqa_dashboard_total_sellers_endpoint(client):
+    response = client.get("/internal/v1/hqa/dashboard/sellers/total")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["seller_column"] == "seller_or_shop"
+    assert payload["date_column"] == "research_date"
+    assert "total_sellers" in payload
+
+
+def test_hqa_dashboard_total_sellers_endpoint_accepts_date_range(client):
+    response = client.get("/internal/v1/hqa/dashboard/sellers/total?date_from=2026-07-01&date_to=2026-08-31")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["date_from"] == "2026-07-01"
+    assert payload["date_to"] == "2026-08-31"
+
+
 def test_hqa_dashboard_seller_analytics_endpoints(client):
     summary_response = client.get("/internal/v1/hqa/dashboard/sellers/summary?date_from=2026-07-01&date_to=2026-08-31")
     trend_response = client.get("/internal/v1/hqa/dashboard/sellers/trend?date_from=2026-07-01&date_to=2026-08-31&granularity=month")
@@ -1262,3 +1279,66 @@ def test_hqa_dashboard_rejects_invalid_granularity(client):
     response = client.get("/internal/v1/hqa/dashboard/prices/trend?granularity=quarter")
     assert response.status_code == 400
     assert "granularity must be one of" in response.json()["detail"]
+
+
+def test_hqa_dashboard_unified_summary_endpoint(client):
+    response = client.get("/internal/v1/hqa/dashboard/summary?date_from=2026-07-01&date_to=2026-08-31")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "seller_analytics" in payload
+    assert "price_analytics" in payload
+    assert "total_sellers" in payload["seller_analytics"]
+    assert "active_sellers" in payload["seller_analytics"]
+    assert "price_sample" in payload["price_analytics"]
+
+
+def test_hqa_dashboard_unified_trend_endpoints(client):
+    seller_response = client.get(
+        "/internal/v1/hqa/dashboard/seller-trend?date_from=2026-07-01&date_to=2026-08-31&group_by=month"
+    )
+    price_response = client.get(
+        "/internal/v1/hqa/dashboard/price-trend?date_from=2026-07-01&date_to=2026-08-31&group_by=week"
+    )
+
+    assert seller_response.status_code == 200
+    assert price_response.status_code == 200
+
+    seller_payload = seller_response.json()
+    price_payload = price_response.json()
+    assert seller_payload["granularity"] == "month"
+    assert price_payload["granularity"] == "week"
+    assert isinstance(seller_payload["points"], list)
+    assert isinstance(price_payload["points"], list)
+    if seller_payload["points"]:
+        first_point = seller_payload["points"][0]
+        assert "total_sellers" in first_point
+        assert "new_sellers" in first_point
+    if price_payload["points"]:
+        first_point = price_payload["points"][0]
+        assert "avg_price" in first_point
+        assert "min_price" in first_point
+        assert "max_price" in first_point
+
+
+def test_hqa_dashboard_price_comparison_endpoint(client):
+    response = client.get(
+        "/internal/v1/hqa/dashboard/price-comparison?date_from=2026-07-01&date_to=2026-08-31&compare_by=brand&limit=10"
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["compare_by"] == "brand"
+    assert isinstance(payload["items"], list)
+
+
+def test_hqa_dashboard_alerts_include_structured_price_drop_fields(client):
+    response = client.get("/internal/v1/hqa/dashboard/alerts?date_from=2026-07-01&date_to=2026-08-31")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "alerts" in payload
+    for alert in payload["alerts"]:
+        if alert.get("type") != "price_drop":
+            continue
+        assert alert.get("severity") in {"warning", "critical"}
+        assert "previous_avg_price" in alert
+        assert "current_avg_price" in alert
+        assert "change_percent" in alert

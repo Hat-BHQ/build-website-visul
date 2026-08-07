@@ -2650,6 +2650,38 @@ def fetch_hqa_dashboard_filter_options(
     }
 
 
+def fetch_hqa_dashboard_total_sellers(
+    db: Session,
+    *,
+    date_from: date | None,
+    date_to: date | None,
+):
+    statement = select(listing_table.c.seller_or_shop, listing_table.c.research_date)
+    statement = _apply_dashboard_date_and_numeric_filters(
+        statement,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=None,
+        max_price=None,
+    )
+    scope = statement.order_by(None).subquery("dashboard_total_sellers_scope")
+    seller_expr = func.trim(func.coalesce(scope.c.seller_or_shop, ""))
+    row = db.execute(
+        select(
+            func.count(func.distinct(func.nullif(seller_expr, ""))).label("total_sellers"),
+        )
+    ).mappings().one()
+    return {
+        "title": "Total Sellers",
+        "description": "Nguoi ban trong database",
+        "total_sellers": _safe_int(row.get("total_sellers")),
+        "date_from": date_from.isoformat() if date_from else None,
+        "date_to": date_to.isoformat() if date_to else None,
+        "seller_column": "seller_or_shop",
+        "date_column": "research_date",
+    }
+
+
 def fetch_hqa_dashboard_sellers_summary(
     db: Session,
     *,
@@ -2686,10 +2718,11 @@ def fetch_hqa_dashboard_sellers_summary(
 
     seller_expr = func.trim(func.coalesce(scope.c.seller_or_shop, ""))
     status_expr = func.lower(func.trim(func.coalesce(scope.c.listing_status, "")))
+    active_seller_case = case((status_expr == "active", func.nullif(seller_expr, "")), else_=None)
     row = db.execute(
         select(
             func.count(func.distinct(func.nullif(seller_expr, ""))).label("total_sellers"),
-            func.coalesce(func.sum(case((status_expr == "active", 1), else_=0)), 0).label("active_listings"),
+            func.count(func.distinct(active_seller_case)).label("active_sellers"),
             func.count().label("total_rows"),
         )
     ).mappings().one()
@@ -2727,7 +2760,7 @@ def fetch_hqa_dashboard_sellers_summary(
     return {
         "total_sellers": _safe_int(row.get("total_sellers")),
         "new_sellers": new_sellers,
-        "active_listings": _safe_int(row.get("active_listings")),
+        "active_sellers": _safe_int(row.get("active_sellers")),
         "total_listings": _safe_int(row.get("total_rows")),
     }
 
@@ -2781,12 +2814,40 @@ def fetch_hqa_dashboard_sellers_trend(
         .order_by(period_expr.asc())
     )
     rows = db.execute(query).mappings().all()
+
+    first_seen_scope = (
+        select(
+            seller_expr.label("seller"),
+            func.min(scope.c.research_date).label("first_seen_date"),
+        )
+        .where(scope.c.research_date.is_not(None))
+        .where(seller_expr != "")
+        .group_by(seller_expr)
+    ).subquery("seller_first_seen_scope")
+
+    first_seen_period_expr = _dashboard_bucket_expression(db, normalized_granularity, first_seen_scope.c.first_seen_date)
+    new_seller_rows = db.execute(
+        select(
+            first_seen_period_expr.label("period"),
+            func.count().label("new_sellers"),
+        )
+        .select_from(first_seen_scope)
+        .group_by(first_seen_period_expr)
+        .order_by(first_seen_period_expr.asc())
+    ).mappings().all()
+    new_sellers_by_period = {
+        str(row.get("period") or "unknown"): _safe_int(row.get("new_sellers"))
+        for row in new_seller_rows
+    }
+
     return {
         "granularity": normalized_granularity,
         "points": [
             {
                 "period": row.get("period") or "unknown",
+                "total_sellers": _safe_int(row.get("seller_count")),
                 "seller_count": _safe_int(row.get("seller_count")),
+                "new_sellers": new_sellers_by_period.get(str(row.get("period") or "unknown"), 0),
                 "listing_count": _safe_int(row.get("listing_count")),
             }
             for row in rows
@@ -2953,6 +3014,7 @@ def fetch_hqa_dashboard_prices_summary(
     currency_rows = db.execute(select(scope.c.currency)).mappings().all()
     return {
         "sample_size": _safe_int(row.get("sample_size")),
+        "price_sample": _safe_int(row.get("sample_size")),
         "avg_price": round(_safe_float(row.get("avg_price")) or 0.0, 2),
         "median_price": round(_median(prices), 2),
         "min_price": round(_safe_float(row.get("min_price")) or 0.0, 2),
@@ -3136,6 +3198,8 @@ def fetch_hqa_dashboard_alerts(
     min_price: Decimal | float | None,
     max_price: Decimal | float | None,
     price_drop_threshold_pct: float,
+    price_drop_warning_threshold_pct: float,
+    price_drop_critical_threshold_pct: float,
     min_sample_for_price_alert: int,
     new_seller_lookback_days: int,
     out_of_stock_min_count: int,
@@ -3205,14 +3269,33 @@ def fetch_hqa_dashboard_alerts(
         curr_sample = _safe_int(current.get("sample_size"))
         if prev_avg > 0 and prev_sample >= min_sample_for_price_alert and curr_sample >= min_sample_for_price_alert:
             drop_pct = ((prev_avg - curr_avg) / prev_avg) * 100
-            if drop_pct >= price_drop_threshold_pct:
+            warning_threshold = max(0.0, float(price_drop_warning_threshold_pct or 0.0))
+            critical_threshold = max(warning_threshold, float(price_drop_critical_threshold_pct or 0.0))
+            fallback_threshold = max(0.0, float(price_drop_threshold_pct or 0.0))
+            if warning_threshold <= 0:
+                warning_threshold = fallback_threshold
+            if critical_threshold <= 0:
+                critical_threshold = max(warning_threshold, fallback_threshold)
+
+            severity = None
+            if drop_pct >= critical_threshold:
+                severity = "critical"
+            elif drop_pct >= warning_threshold:
+                severity = "warning"
+
+            if severity:
                 alerts.append(
                     {
                         "type": "price_drop",
-                        "severity": "high",
+                        "severity": severity,
+                        "brand": (brands or [None])[0],
+                        "model": (models or [None])[0],
                         "period": current.get("period"),
+                        "previous_avg_price": round(prev_avg, 2),
+                        "current_avg_price": round(curr_avg, 2),
+                        "change_percent": round(((curr_avg - prev_avg) / prev_avg) * 100, 2),
                         "value": round(drop_pct, 2),
-                        "message": f"Average price dropped {drop_pct:.2f}% versus previous period",
+                        "message": f"Average price decreased {drop_pct:.2f}% compared with previous period",
                     }
                 )
 
@@ -3299,6 +3382,161 @@ def fetch_hqa_dashboard_alerts(
     }
 
 
+def fetch_hqa_dashboard_summary(
+    db: Session,
+    *,
+    keyword: str | None,
+    marketplaces: list[str] | None,
+    brands: list[str] | None,
+    models: list[str] | None,
+    statuses: list[str] | None,
+    category_names: list[str] | None,
+    buying_options: list[str] | None,
+    sellers: list[str] | None,
+    currency: str | None,
+    date_from: date | None,
+    date_to: date | None,
+    min_price: Decimal | float | None,
+    max_price: Decimal | float | None,
+):
+    return {
+        "seller_analytics": fetch_hqa_dashboard_sellers_summary(
+            db,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=None,
+            max_price=None,
+        ),
+        "price_analytics": fetch_hqa_dashboard_prices_summary(
+            db,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            max_price=max_price,
+        ),
+    }
+
+
+def fetch_hqa_dashboard_price_comparison(
+    db: Session,
+    *,
+    limit: int,
+    compare_by: str | None,
+    keyword: str | None,
+    marketplaces: list[str] | None,
+    brands: list[str] | None,
+    models: list[str] | None,
+    statuses: list[str] | None,
+    category_names: list[str] | None,
+    buying_options: list[str] | None,
+    sellers: list[str] | None,
+    currency: str | None,
+    date_from: date | None,
+    date_to: date | None,
+    min_price: Decimal | float | None,
+    max_price: Decimal | float | None,
+):
+    if limit < 1 or limit > 100:
+        raise ValueError("limit must be between 1 and 100")
+
+    mode = (compare_by or "").strip().lower()
+    if not mode:
+        if brands and not models:
+            mode = "model"
+        elif models:
+            mode = "model"
+        elif keyword:
+            mode = "keyword"
+        else:
+            mode = "brand"
+
+    if mode == "keyword":
+        payload = fetch_hqa_dashboard_prices_by_keyword(
+            db,
+            limit=limit,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            max_price=max_price,
+        )
+        return {"compare_by": "keyword", "items": payload.get("items") or []}
+
+    if mode not in {"brand", "model"}:
+        raise ValueError("compare_by must be one of: brand, model, keyword")
+
+    statement = _build_price_scope_statement(
+        keyword=keyword,
+        marketplaces=marketplaces,
+        brands=brands,
+        models=models,
+        statuses=statuses,
+        category_names=category_names,
+        buying_options=buying_options,
+        sellers=sellers,
+        currency=currency,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=min_price,
+        max_price=max_price,
+    )
+    scope = statement.order_by(None).subquery("price_comparison_scope")
+    value_expr = func.trim(func.coalesce(scope.c.brand if mode == "brand" else scope.c.model, ""))
+    rows = db.execute(
+        select(
+            value_expr.label("name"),
+            func.count().label("sample_size"),
+            func.avg(scope.c.price).label("avg_price"),
+            func.min(scope.c.price).label("min_price"),
+            func.max(scope.c.price).label("max_price"),
+        )
+        .where(value_expr != "")
+        .group_by(value_expr)
+        .order_by(func.avg(scope.c.price).desc(), value_expr.asc())
+        .limit(limit)
+    ).mappings().all()
+
+    return {
+        "compare_by": mode,
+        "items": [
+            {
+                "name": row.get("name") or "",
+                "sample_size": _safe_int(row.get("sample_size")),
+                "avg_price": round(_safe_float(row.get("avg_price")) or 0.0, 2),
+                "min_price": round(_safe_float(row.get("min_price")) or 0.0, 2),
+                "max_price": round(_safe_float(row.get("max_price")) or 0.0, 2),
+            }
+            for row in rows
+        ],
+    }
+
+
 def fetch_hqa_dashboard_export_rows(
     db: Session,
     *,
@@ -3319,11 +3557,34 @@ def fetch_hqa_dashboard_export_rows(
     min_price: Decimal | float | None,
     max_price: Decimal | float | None,
     price_drop_threshold_pct: float,
+    price_drop_warning_threshold_pct: float,
+    price_drop_critical_threshold_pct: float,
     min_sample_for_price_alert: int,
     new_seller_lookback_days: int,
     out_of_stock_min_count: int,
     out_of_stock_alert_percent: float,
 ) -> list[dict]:
+    if dataset == "summary":
+        summary = fetch_hqa_dashboard_summary(
+            db,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            max_price=max_price,
+        )
+        row = {}
+        row.update({f"seller_{key}": value for key, value in (summary.get("seller_analytics") or {}).items()})
+        row.update({f"price_{key}": value for key, value in (summary.get("price_analytics") or {}).items()})
+        return [row]
     if dataset == "sellers_summary":
         return [
             fetch_hqa_dashboard_sellers_summary(
@@ -3339,8 +3600,28 @@ def fetch_hqa_dashboard_export_rows(
                 currency=currency,
                 date_from=date_from,
                 date_to=date_to,
+                min_price=None,
+                max_price=None,
             )
         ]
+    if dataset == "seller_trend":
+        return fetch_hqa_dashboard_sellers_trend(
+            db,
+            granularity=granularity,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=None,
+            max_price=None,
+        )["points"]
     if dataset == "sellers_trend":
         return fetch_hqa_dashboard_sellers_trend(
             db,
@@ -3356,6 +3637,8 @@ def fetch_hqa_dashboard_export_rows(
             currency=currency,
             date_from=date_from,
             date_to=date_to,
+            min_price=None,
+            max_price=None,
         )["points"]
     if dataset == "sellers_top":
         return fetch_hqa_dashboard_top_sellers(
@@ -3372,6 +3655,8 @@ def fetch_hqa_dashboard_export_rows(
             currency=currency,
             date_from=date_from,
             date_to=date_to,
+            min_price=None,
+            max_price=None,
         )["items"]
     if dataset == "prices_summary":
         return [
@@ -3410,10 +3695,47 @@ def fetch_hqa_dashboard_export_rows(
             min_price=min_price,
             max_price=max_price,
         )["points"]
+    if dataset == "price_trend":
+        return fetch_hqa_dashboard_prices_trend(
+            db,
+            granularity=granularity,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            max_price=max_price,
+        )["points"]
     if dataset == "prices_by_keyword":
         return fetch_hqa_dashboard_prices_by_keyword(
             db,
             limit=top_limit,
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            max_price=max_price,
+        )["items"]
+    if dataset == "price_comparison":
+        return fetch_hqa_dashboard_price_comparison(
+            db,
+            limit=top_limit,
+            compare_by="",
             keyword=keyword,
             marketplaces=marketplaces,
             brands=brands,
@@ -3445,6 +3767,8 @@ def fetch_hqa_dashboard_export_rows(
             min_price=min_price,
             max_price=max_price,
             price_drop_threshold_pct=price_drop_threshold_pct,
+            price_drop_warning_threshold_pct=price_drop_warning_threshold_pct,
+            price_drop_critical_threshold_pct=price_drop_critical_threshold_pct,
             min_sample_for_price_alert=min_sample_for_price_alert,
             new_seller_lookback_days=new_seller_lookback_days,
             out_of_stock_min_count=out_of_stock_min_count,

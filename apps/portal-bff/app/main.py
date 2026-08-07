@@ -159,6 +159,31 @@ async def hqa_dashboard_filter_options(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/filter-options", request)
 
 
+@app.get("/api/v1/hqa/dashboard/sellers/total")
+async def hqa_dashboard_sellers_total(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/sellers/total", request)
+
+
+@app.get("/api/v1/hqa/dashboard/summary")
+async def hqa_dashboard_summary_v2(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/summary", request)
+
+
+@app.get("/api/v1/hqa/dashboard/seller-trend")
+async def hqa_dashboard_seller_trend_v2(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/seller-trend", request)
+
+
+@app.get("/api/v1/hqa/dashboard/price-trend")
+async def hqa_dashboard_price_trend_v2(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/price-trend", request)
+
+
+@app.get("/api/v1/hqa/dashboard/price-comparison")
+async def hqa_dashboard_price_comparison_v2(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/price-comparison", request)
+
+
 @app.get("/api/v1/hqa/dashboard/sellers/summary")
 async def hqa_dashboard_sellers_summary(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/sellers/summary", request)

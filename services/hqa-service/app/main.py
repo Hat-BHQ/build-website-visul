@@ -21,11 +21,14 @@ from app.service import (
     fetch_duplicate_listing_summary,
     fetch_dashboard_counts,
     fetch_hqa_dashboard_alerts,
+    fetch_hqa_dashboard_summary,
     fetch_hqa_dashboard_export_rows,
     fetch_hqa_dashboard_filter_options,
+    fetch_hqa_dashboard_price_comparison,
     fetch_hqa_dashboard_prices_by_keyword,
     fetch_hqa_dashboard_prices_summary,
     fetch_hqa_dashboard_prices_trend,
+    fetch_hqa_dashboard_total_sellers,
     fetch_hqa_dashboard_sellers_summary,
     fetch_hqa_dashboard_sellers_trend,
     fetch_hqa_dashboard_top_sellers,
@@ -455,6 +458,133 @@ def hqa_dashboard_filter_options(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/internal/v1/hqa/dashboard/summary")
+def hqa_dashboard_summary(
+    request: Request,
+    keyword: str | None = None,
+    currency: str | None = None,
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    filters = _collect_hqa_dashboard_filters(
+        request,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=min_price,
+        max_price=max_price,
+        currency=currency,
+    )
+    try:
+        return fetch_hqa_dashboard_summary(db, **filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/v1/hqa/dashboard/sellers/total")
+def hqa_dashboard_total_sellers(
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    try:
+        return fetch_hqa_dashboard_total_sellers(
+            db,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/v1/hqa/dashboard/seller-trend")
+def hqa_dashboard_seller_trend(
+    request: Request,
+    keyword: str | None = None,
+    currency: str | None = None,
+    group_by: str = Query(default="month"),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    filters = _collect_hqa_dashboard_filters(
+        request,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=None,
+        max_price=None,
+        currency=currency,
+    )
+    try:
+        return fetch_hqa_dashboard_sellers_trend(db, granularity=group_by, **filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/v1/hqa/dashboard/price-trend")
+def hqa_dashboard_price_trend(
+    request: Request,
+    keyword: str | None = None,
+    currency: str | None = None,
+    group_by: str = Query(default="month"),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    filters = _collect_hqa_dashboard_filters(
+        request,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=min_price,
+        max_price=max_price,
+        currency=currency,
+    )
+    try:
+        return fetch_hqa_dashboard_prices_trend(db, granularity=group_by, **filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/v1/hqa/dashboard/price-comparison")
+def hqa_dashboard_price_comparison(
+    request: Request,
+    keyword: str | None = None,
+    currency: str | None = None,
+    compare_by: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    filters = _collect_hqa_dashboard_filters(
+        request,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=min_price,
+        max_price=max_price,
+        currency=currency,
+    )
+    try:
+        return fetch_hqa_dashboard_price_comparison(db, compare_by=compare_by, limit=limit, **filters)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/internal/v1/hqa/dashboard/sellers/summary")
 def hqa_dashboard_sellers_summary(
     request: Request,
@@ -641,6 +771,8 @@ def hqa_dashboard_alerts(
             db,
             **filters,
             price_drop_threshold_pct=settings.hqa_price_drop_alert_percent,
+            price_drop_warning_threshold_pct=settings.hqa_price_drop_warning_alert_percent,
+            price_drop_critical_threshold_pct=settings.hqa_price_drop_critical_alert_percent,
             min_sample_for_price_alert=settings.hqa_price_alert_min_sample,
             new_seller_lookback_days=settings.hqa_new_seller_lookback_days,
             out_of_stock_min_count=settings.hqa_out_of_stock_min_count,
@@ -682,6 +814,8 @@ def hqa_dashboard_export(
             top_limit=top_limit,
             **filters,
             price_drop_threshold_pct=settings.hqa_price_drop_alert_percent,
+            price_drop_warning_threshold_pct=settings.hqa_price_drop_warning_alert_percent,
+            price_drop_critical_threshold_pct=settings.hqa_price_drop_critical_alert_percent,
             min_sample_for_price_alert=settings.hqa_price_alert_min_sample,
             new_seller_lookback_days=settings.hqa_new_seller_lookback_days,
             out_of_stock_min_count=settings.hqa_out_of_stock_min_count,

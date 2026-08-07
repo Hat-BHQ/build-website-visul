@@ -78,12 +78,17 @@ assert(styles.includes('.all-listings-datetime {'), 'Datetime cell class must ex
 assert(styles.includes('white-space: nowrap;'), 'Datetime columns must keep single-line values');
 
 assert(source.includes('/hqa/dashboard/filter-options?${'), 'Dashboard must load filter options from new API');
-assert(source.includes('/hqa/dashboard/sellers/summary'), 'Dashboard must use sellers summary API');
-assert(source.includes('/hqa/dashboard/prices/summary'), 'Dashboard must use prices summary API');
+assert(source.includes('/hqa/dashboard/sellers/total'), 'Dashboard must load total sellers KPI from dedicated API');
+assert(source.includes('/hqa/dashboard/summary'), 'Dashboard must use summary API');
+assert(source.includes('/hqa/dashboard/seller-trend'), 'Dashboard must use seller trend API');
+assert(source.includes('/hqa/dashboard/price-trend'), 'Dashboard must use price trend API');
+assert(source.includes('/hqa/dashboard/price-comparison'), 'Dashboard must use price comparison API');
 assert(source.includes('/hqa/dashboard/alerts'), 'Dashboard must use alerts API');
 assert(source.includes('/hqa/dashboard/export?${'), 'Dashboard export must use new API');
-assert(source.includes('appliedSellerFilters'), 'Dashboard state must separate seller filters');
-assert(source.includes('appliedPriceFilters'), 'Dashboard state must separate price filters');
+assert(source.includes('appliedFilters'), 'Dashboard state must use shared applied filters');
+assert(source.includes('draftFilters'), 'Dashboard state must use shared draft filters');
+assert(source.includes('id="dashboard-seller-stats-filters"'), 'Dashboard must render seller stats date filter form');
+assert(source.includes('Total Sellers'), 'Dashboard must render Total Sellers KPI card');
 
 assert(source.includes('/hqa/data-check/duplicates/summary'), 'Data check summary API must be used');
 assert(source.includes('/hqa/data-check/duplicates?${buildDataCheckParams(page).toString()}'), 'Data check duplicate groups API must be used');

@@ -384,8 +384,16 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 .dashboard-legend i { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
 .dashboard-subpanel { margin-top: 14px; }
 .dashboard-subpanel h3 { margin-top: 0; }
+.dashboard-seller-stats-filters { display: grid; grid-template-columns: repeat(4, minmax(160px, max-content)); gap: 10px; align-items: end; margin-bottom: 12px; }
+.dashboard-seller-stats-filters button { height: 44px; }
+.dashboard-seller-stats-metrics { grid-template-columns: minmax(260px, 360px); }
 .dashboard-alerts { margin: 0; padding-left: 20px; color: #475467; }
 .dashboard-alerts li { margin-bottom: 8px; }
+.dashboard-alert-item { list-style: none; margin-left: -20px; border: 1px solid #e2e8f0; border-left-width: 5px; border-radius: 10px; padding: 10px 12px; background: #ffffff; }
+.dashboard-alert-critical { border-left-color: #b42318; background: #fff5f4; }
+.dashboard-alert-warning { border-left-color: #b54708; background: #fffaeb; }
+.dashboard-alert-info { border-left-color: #175cd3; background: #eff8ff; }
+.dashboard-alert-detail { margin-top: 6px; color: #334155; font-size: 13px; }
 
 .data-check-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .data-check-table { min-width: 1120px; }
