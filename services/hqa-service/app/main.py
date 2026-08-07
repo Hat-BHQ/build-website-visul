@@ -197,6 +197,8 @@ def hqa_all_listings(
     min_price: float | None = Query(default=None, ge=0),
     max_price: float | None = Query(default=None, ge=0),
     sort_collected: str = Query(default="newest"),
+    sort_by: str | None = None,
+    sort_order: str | None = None,
     search: str | None = None,
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.listings.view")),
@@ -219,6 +221,8 @@ def hqa_all_listings(
             max_price=max_price,
             sort_collected=sort_collected,
             search=search,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -239,6 +243,8 @@ def hqa_all_listings(
             "min_price": min_price,
             "max_price": max_price,
             "sort_collected": sort_collected,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
             "search": search,
         },
     }

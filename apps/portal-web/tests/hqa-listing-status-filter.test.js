@@ -22,6 +22,8 @@ assert(source.includes('appendArrayParams(params, \"category_name\", filters.cat
 assert(source.includes('appendArrayParams(params, \"buying_option\", filters.buyingOptions)') || source.includes("appendArrayParams(params, 'buying_option', filters.buyingOptions)"), 'Buying options must be encoded as repeated query params');
 assert(source.includes("if (filters.minPrice !== '') params.set('min_price', String(filters.minPrice).trim());"), 'min_price must be included in All Listings params');
 assert(source.includes("if (filters.maxPrice !== '') params.set('max_price', String(filters.maxPrice).trim());"), 'max_price must be included in All Listings params');
+assert(source.includes("params.set('sort_by', 'price');"), 'Price sort must send sort_by=price when selected');
+assert(source.includes("params.set('sort_order', 'asc');") || source.includes("params.set('sort_order', 'desc');"), 'Price sort must send sort_order asc/desc when selected');
 assert(source.includes("if (filters.marketplace) params.set('marketplace', filters.marketplace);"), 'marketplace must be included in All Listings params');
 
 assert(source.includes('function cloneAllListingsFilters(filters)'), 'All Listings filter cloning helper must exist');
@@ -45,6 +47,8 @@ assert(source.includes('parseNonNegativeNumber(nextFilters.minPrice)'), 'Min pri
 assert(source.includes('parseNonNegativeNumber(nextFilters.maxPrice)'), 'Max price validation must exist');
 assert(source.includes("candidate.replace(/,/g, '')"), 'Price parser must normalize comma thousand separators');
 assert(source.includes('Min price must be less than or equal to max price.'), 'Price range validation message must exist');
+assert(source.includes('Sort by Price'), 'Price sort dropdown label must exist');
+assert(source.includes('id="sort-price"'), 'Price sort dropdown must exist');
 
 assert(source.includes('await loadAllListingsFilterOptions();'), 'All Listings filter options loader must be used');
 assert(source.includes('await loadAllListingsSummary();'), 'All Listings summary loader must be used');

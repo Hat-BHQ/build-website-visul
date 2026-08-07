@@ -17,7 +17,7 @@ def _raw_ids(payload):
     return [item["listing_id"] for item in payload["items"]]
 
 
-def _insert_listing(db_session, row_id: str, listing_id: str, listing_title: str):
+def _insert_listing(db_session, row_id: str, listing_id: str, listing_title: str, price: float | int | None = None):
     db_session.execute(
         marketplace_research_results.insert(),
         {
@@ -30,7 +30,7 @@ def _insert_listing(db_session, row_id: str, listing_id: str, listing_title: str
             "listing_url": f"https://example.test/{listing_id}",
             "image_url": None,
             "seller_or_shop": "Pioneer Store",
-            "price": 1200,
+            "price": 1200 if price is None else price,
             "currency": "USD",
             "condition": "used",
             "category": "speaker",
@@ -945,6 +945,85 @@ def test_all_listings_new_endpoint_returns_paginated_rows(client):
     assert payload["page_size"] == 10
     assert "items" in payload
     assert "total" in payload
+
+
+def test_all_listings_supports_price_sorting(client):
+    asc_response = client.get("/internal/v1/hqa/listings?page=1&page_size=10&sort_by=price&sort_order=asc")
+    assert asc_response.status_code == 200
+    asc_payload = asc_response.json()
+    assert asc_payload["applied_filters"]["sort_by"] == "price"
+    assert asc_payload["applied_filters"]["sort_order"] == "asc"
+    asc_prices = [item.get("price") for item in asc_payload["items"] if item.get("price") is not None]
+    assert asc_prices == sorted(asc_prices)
+
+    desc_response = client.get("/internal/v1/hqa/listings?page=1&page_size=10&sort_by=price&sort_order=desc")
+    assert desc_response.status_code == 200
+    desc_payload = desc_response.json()
+    assert desc_payload["applied_filters"]["sort_order"] == "desc"
+    desc_prices = [item.get("price") for item in desc_payload["items"] if item.get("price") is not None]
+    assert desc_prices == sorted(desc_prices, reverse=True)
+
+
+def test_all_listings_pagination_and_price_sorting_work_across_pages(client, db_session):
+    for index in range(63):
+        _insert_listing(
+            db_session,
+            row_id=f"pagination-{index + 1}",
+            listing_id=f"PAG-{index + 1:03d}",
+            listing_title=f"Pagination row {index + 1}",
+            price=10 + index,
+        )
+
+    page_one_response = client.get("/internal/v1/hqa/listings?page=1&page_size=50")
+    assert page_one_response.status_code == 200
+    page_one_payload = page_one_response.json()
+    assert page_one_payload["total"] == 89
+    assert page_one_payload["page"] == 1
+    assert page_one_payload["page_size"] == 50
+    assert page_one_payload["total_pages"] == 2
+    assert len(page_one_payload["items"]) == 50
+
+    page_two_response = client.get("/internal/v1/hqa/listings?page=2&page_size=50")
+    assert page_two_response.status_code == 200
+    page_two_payload = page_two_response.json()
+    assert page_two_payload["page"] == 2
+    assert page_two_payload["page_size"] == 50
+    assert page_two_payload["total_pages"] == 2
+    assert len(page_two_payload["items"]) == 39
+
+    asc_page_one_response = client.get("/internal/v1/hqa/listings?page=1&page_size=50&sort_by=price&sort_order=asc")
+    assert asc_page_one_response.status_code == 200
+    asc_page_one_payload = asc_page_one_response.json()
+    asc_page_one_prices = [item.get("price") for item in asc_page_one_payload["items"] if item.get("price") is not None]
+    assert asc_page_one_payload["applied_filters"]["sort_by"] == "price"
+    assert asc_page_one_payload["applied_filters"]["sort_order"] == "asc"
+    assert asc_page_one_prices == sorted(asc_page_one_prices)
+
+    asc_page_two_response = client.get("/internal/v1/hqa/listings?page=2&page_size=50&sort_by=price&sort_order=asc")
+    assert asc_page_two_response.status_code == 200
+    asc_page_two_payload = asc_page_two_response.json()
+    asc_page_two_prices = [item.get("price") for item in asc_page_two_payload["items"] if item.get("price") is not None]
+    assert asc_page_two_payload["applied_filters"]["sort_by"] == "price"
+    assert asc_page_two_payload["applied_filters"]["sort_order"] == "asc"
+    assert asc_page_two_prices == sorted(asc_page_two_prices)
+    assert asc_page_two_prices[0] >= asc_page_one_prices[-1]
+
+    desc_page_one_response = client.get("/internal/v1/hqa/listings?page=1&page_size=50&sort_by=price&sort_order=desc")
+    assert desc_page_one_response.status_code == 200
+    desc_page_one_payload = desc_page_one_response.json()
+    desc_page_one_prices = [item.get("price") for item in desc_page_one_payload["items"] if item.get("price") is not None]
+    assert desc_page_one_payload["applied_filters"]["sort_by"] == "price"
+    assert desc_page_one_payload["applied_filters"]["sort_order"] == "desc"
+    assert desc_page_one_prices == sorted(desc_page_one_prices, reverse=True)
+
+    desc_page_two_response = client.get("/internal/v1/hqa/listings?page=2&page_size=50&sort_by=price&sort_order=desc")
+    assert desc_page_two_response.status_code == 200
+    desc_page_two_payload = desc_page_two_response.json()
+    desc_page_two_prices = [item.get("price") for item in desc_page_two_payload["items"] if item.get("price") is not None]
+    assert desc_page_two_payload["applied_filters"]["sort_by"] == "price"
+    assert desc_page_two_payload["applied_filters"]["sort_order"] == "desc"
+    assert desc_page_two_prices == sorted(desc_page_two_prices, reverse=True)
+    assert desc_page_two_prices[-1] <= desc_page_one_prices[-1]
 
 
 def test_internal_listings_returns_new_datetime_fields(client):

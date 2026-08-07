@@ -1530,7 +1530,22 @@ def _build_all_listings_base_statement(
     return statement
 
 
-def _apply_all_listings_sort(statement, sort_collected: str):
+def _apply_all_listings_sort(statement, sort_collected: str, sort_by: str | None = None, sort_order: str | None = None):
+    if sort_by == "price":
+        normalized_order = (sort_order or "asc").lower()
+        if normalized_order == "asc":
+            return statement.order_by(
+                listing_table.c.price.is_(None),
+                func.coalesce(listing_table.c.price, 0).asc(),
+                listing_table.c.id.desc(),
+            )
+        if normalized_order == "desc":
+            return statement.order_by(
+                listing_table.c.price.is_(None),
+                func.coalesce(listing_table.c.price, 0).desc(),
+                listing_table.c.id.desc(),
+            )
+        raise ValueError("Invalid sort_order")
     if sort_collected == "oldest":
         return statement.order_by(
             listing_table.c.collected_at.is_(None),
@@ -1564,6 +1579,8 @@ def fetch_all_listings(
     max_price: Decimal | float | None,
     sort_collected: str,
     search: str | None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> tuple[list[dict], dict]:
     if page < 1:
         raise ValueError("page must be >= 1")
@@ -1586,7 +1603,7 @@ def fetch_all_listings(
     )
     total = int(db.execute(select(func.count()).select_from(statement.order_by(None).subquery())).scalar_one() or 0)
     offset = (page - 1) * page_size
-    rows = db.execute(_apply_all_listings_sort(statement, sort_collected).offset(offset).limit(page_size)).mappings().all()
+    rows = db.execute(_apply_all_listings_sort(statement, sort_collected, sort_by=sort_by, sort_order=sort_order).offset(offset).limit(page_size)).mappings().all()
     total_pages = (total + page_size - 1) // page_size if total else 0
     return [dict(row) for row in rows], {
         "total": total,

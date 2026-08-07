@@ -56,6 +56,7 @@ const state = {
         categoryNames: [],
         buyingOptions: [],
         sortCollected: 'newest',
+        priceSort: 'default',
         minPrice: '',
         maxPrice: '',
         search: '',
@@ -71,6 +72,7 @@ const state = {
         categoryNames: [],
         buyingOptions: [],
         sortCollected: 'newest',
+        priceSort: 'default',
         minPrice: '',
         maxPrice: '',
         search: '',
@@ -1241,6 +1243,13 @@ function buildAllListingsParams(page = 1, includePagination = true) {
   if (filters.brand) params.set('brand', filters.brand);
   if (filters.model) params.set('model', filters.model);
   if (filters.sortCollected) params.set('sort_collected', filters.sortCollected);
+  if (filters.priceSort === 'price_asc') {
+    params.set('sort_by', 'price');
+    params.set('sort_order', 'asc');
+  } else if (filters.priceSort === 'price_desc') {
+    params.set('sort_by', 'price');
+    params.set('sort_order', 'desc');
+  }
   if (filters.search) params.set('search', filters.search.trim());
   if (filters.minPrice !== '') params.set('min_price', String(filters.minPrice).trim());
   if (filters.maxPrice !== '') params.set('max_price', String(filters.maxPrice).trim());
@@ -1386,6 +1395,7 @@ function buildDefaultAllListingsFilters() {
     categoryNames: [],
     buyingOptions: [],
     sortCollected: 'newest',
+    priceSort: 'default',
     minPrice: '',
     maxPrice: '',
     search: '',
@@ -1404,6 +1414,7 @@ function snapshotAllListingsFiltersFromDom() {
     categoryNames: [...(state.hqa.allListings.draftFilters.categoryNames || [])],
     buyingOptions: [...(state.hqa.allListings.draftFilters.buyingOptions || [])],
     sortCollected: document.getElementById('sort-collected')?.value || 'newest',
+    priceSort: document.getElementById('sort-price')?.value || 'default',
     minPrice: document.getElementById('min-price')?.value.trim() || '',
     maxPrice: document.getElementById('max-price')?.value.trim() || '',
     search: document.getElementById('search')?.value.trim() || '',
@@ -1559,7 +1570,7 @@ function bindAllListingsFilterEvents() {
     }
   });
 
-  filterContainer.addEventListener('change', (event) => {
+  filterContainer.addEventListener('change', async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
 
@@ -1570,7 +1581,7 @@ function bindAllListingsFilterEvents() {
       return;
     }
 
-    if (!['from-date', 'to-date', 'marketplace', 'brand', 'sort-collected'].includes(target.id)) return;
+    if (!['from-date', 'to-date', 'marketplace', 'brand', 'sort-collected', 'sort-price'].includes(target.id)) return;
 
     const before = cloneAllListingsFilters(state.hqa.allListings.draftFilters);
     const next = snapshotAllListingsFiltersFromDom();
@@ -1579,6 +1590,18 @@ function bindAllListingsFilterEvents() {
       resetLazyOptionField('model', { clearCache: true });
     }
     state.hqa.allListings.draftFilters = cloneAllListingsFilters(next);
+
+    if (target.id === 'sort-price') {
+      state.hqa.allListings.appliedFilters = cloneAllListingsFilters(next);
+      state.hqa.page = 1;
+      clearAllListingsNotification();
+      await loadAllListingsSummary();
+      renderHqaSummary();
+      await loadActiveListings();
+      renderHqaFilterOptions();
+      return;
+    }
+
     renderHqaFilterOptions();
   });
 
@@ -1809,6 +1832,7 @@ function renderHqaFilterOptions() {
       <label class="filter-field filter-field--price ${priceRangeInvalid ? 'is-error' : ''}"><span class="filter-field__label">Minimum price</span><input id="min-price" type="number" min="0" step="0.01" placeholder="Minimum price" value="${escapeHtml(filters.minPrice)}"></label>
       <label class="filter-field filter-field--price ${priceRangeInvalid ? 'is-error' : ''}"><span class="filter-field__label">Maximum price</span><input id="max-price" type="number" min="0" step="0.01" placeholder="Maximum price" value="${escapeHtml(filters.maxPrice)}"></label>
       <label class="filter-field filter-field--time"><span class="filter-field__label">Collected time</span><select id="sort-collected" aria-label="Sort collected time"><option value="newest" ${filters.sortCollected === 'newest' ? 'selected' : ''}>Newest first</option><option value="oldest" ${filters.sortCollected === 'oldest' ? 'selected' : ''}>Oldest first</option></select></label>
+      <label class="filter-field filter-field--price"><span class="filter-field__label">Sort by Price</span><select id="sort-price" aria-label="Sort by price"><option value="default" ${filters.priceSort === 'default' ? 'selected' : ''}>Default</option><option value="price_asc" ${filters.priceSort === 'price_asc' ? 'selected' : ''}>Price: Low to High</option><option value="price_desc" ${filters.priceSort === 'price_desc' ? 'selected' : ''}>Price: High to Low</option></select></label>
       <label class="filter-field filter-field--search"><span class="filter-field__label">Search</span><input id="search" placeholder="Search listing title, listing ID, seller" value="${escapeHtml(filters.search)}"></label>
       <div class="filter-actions">
         <button type="submit">Apply filters</button>
@@ -2184,7 +2208,6 @@ function listingRow(item, mode = 'report') {
 function renderPaginationFooter(payload) {
   const pagination = buildPaginationState(payload);
   const pageItems = buildPageButtons(pagination.totalPages, pagination.page);
-  const hasPagination = pagination.totalPages > 1;
   const pageSizeOptions = PAGE_SIZE_OPTIONS.map((size) => `<option value="${size}" ${pagination.pageSize === size ? 'selected' : ''}>${size}</option>`).join('');
   return `
     <div class="listing-footer">
@@ -2198,13 +2221,13 @@ function renderPaginationFooter(payload) {
           <select id="page-size" aria-label="Rows per page">${pageSizeOptions}</select>
         </label>
         <nav class="pagination report-pagination" aria-label="Pagination">
-          <button type="button" id="page-first" aria-label="First page" ${pagination.hasPrevious ? '' : 'disabled'}>First</button>
-          <button type="button" id="page-prev" aria-label="Previous page" ${pagination.hasPrevious ? '' : 'disabled'}>Previous</button>
+          <button type="button" data-page-action="first" ${pagination.hasPrevious ? '' : 'disabled'}>First</button>
+          <button type="button" data-page-action="prev" ${pagination.hasPrevious ? '' : 'disabled'}>Previous</button>
           ${pageItems.map((item) => item === '...'
             ? '<span class="page-ellipsis" aria-hidden="true">...</span>'
-            : `<button type="button" class="page-btn ${item === pagination.page ? 'active' : ''}" aria-label="Page ${item}" aria-current="${item === pagination.page ? 'page' : 'false'}" data-page="${item}">${item}</button>`).join('')}
-          <button type="button" id="page-next" aria-label="Next page" ${pagination.hasNext ? '' : 'disabled'}>Next</button>
-          <button type="button" id="page-last" aria-label="Last page" ${pagination.hasNext ? '' : 'disabled'}>Last</button>
+            : `<button type="button" class="page-btn ${item === pagination.page ? 'active' : ''}" data-page-action="page" data-page="${item}" aria-label="Page ${item}" aria-current="${item === pagination.page ? 'page' : 'false'}">${item}</button>`).join('')}
+          <button type="button" data-page-action="next" ${pagination.hasNext ? '' : 'disabled'}>Next</button>
+          <button type="button" data-page-action="last" ${pagination.hasNext ? '' : 'disabled'}>Last</button>
         </nav>
       </div>
     </div>`;
@@ -2322,57 +2345,67 @@ async function renderHqa(content, options = {}) {
 
   bindAllListingsFilterEvents();
 
-  const paginationPayload = state.hqa.rawListings;
-  if (paginationPayload) {
-    const first = document.getElementById('page-first');
-    if (first && !first.dataset.bound) {
-      first.dataset.bound = 'true';
-      first.addEventListener('click', async () => {
-        state.hqa.page = 1;
-        await loadActiveListings({ scrollToTable: true });
-      });
-    }
-    const prev = document.getElementById('page-prev');
-    if (prev && !prev.dataset.bound) {
-      prev.dataset.bound = 'true';
-      prev.addEventListener('click', async () => {
-        state.hqa.page = Math.max(1, state.hqa.page - 1);
-        await loadActiveListings({ scrollToTable: true });
-      });
-    }
-    const next = document.getElementById('page-next');
-    if (next && !next.dataset.bound) {
-      next.dataset.bound = 'true';
-      next.addEventListener('click', async () => {
-        state.hqa.page = Math.min(paginationPayload.total_pages || 1, state.hqa.page + 1);
-        await loadActiveListings({ scrollToTable: true });
-      });
-    }
-    const last = document.getElementById('page-last');
-    if (last && !last.dataset.bound) {
-      last.dataset.bound = 'true';
-      last.addEventListener('click', async () => {
-        state.hqa.page = paginationPayload.total_pages || 1;
-        await loadActiveListings({ scrollToTable: true });
-      });
-    }
-    document.querySelectorAll('.page-btn').forEach((button) => {
-      if (button.dataset.bound) return;
-      button.dataset.bound = 'true';
-      button.addEventListener('click', async () => {
-        state.hqa.page = Number(button.dataset.page);
-        await loadActiveListings({ scrollToTable: true });
-      });
+  const paginationContainer = document.getElementById('hqa-pagination');
+  if (paginationContainer && !paginationContainer.dataset.paginationBound) {
+    paginationContainer.dataset.paginationBound = 'true';
+    paginationContainer.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-page-action]');
+      if (!button || button.disabled) return;
+
+      const action = button.dataset.pageAction;
+      const paginationPayload = state.hqa.rawListings;
+      const totalPages = Math.max(1, Math.ceil((Number(paginationPayload?.total || state.hqa.total || 0)) / Math.max(1, Number(state.hqa.pageSize || 50))));
+
+      if (action === 'first') {
+        if (state.hqa.page !== 1) {
+          state.hqa.page = 1;
+          await loadActiveListings({ scrollToTable: true });
+        }
+        return;
+      }
+
+      if (action === 'prev') {
+        if (state.hqa.page > 1) {
+          state.hqa.page -= 1;
+          await loadActiveListings({ scrollToTable: true });
+        }
+        return;
+      }
+
+      if (action === 'next') {
+        if (state.hqa.page < totalPages) {
+          state.hqa.page += 1;
+          await loadActiveListings({ scrollToTable: true });
+        }
+        return;
+      }
+
+      if (action === 'last') {
+        if (state.hqa.page !== totalPages) {
+          state.hqa.page = totalPages;
+          await loadActiveListings({ scrollToTable: true });
+        }
+        return;
+      }
+
+      if (action === 'page') {
+        const nextPage = Number(button.dataset.page);
+        if (Number.isFinite(nextPage) && nextPage >= 1 && nextPage !== state.hqa.page) {
+          state.hqa.page = nextPage;
+          await loadActiveListings({ scrollToTable: true });
+        }
+      }
     });
-    const pageSize = document.getElementById('page-size');
-    if (pageSize && !pageSize.dataset.bound) {
-      pageSize.dataset.bound = 'true';
-      pageSize.addEventListener('change', async (event) => {
-        state.hqa.pageSize = Number(event.target.value || 50);
-        state.hqa.page = 1;
-        await loadActiveListings();
-      });
-    }
+  }
+
+  const pageSize = document.getElementById('page-size');
+  if (pageSize && !pageSize.dataset.bound) {
+    pageSize.dataset.bound = 'true';
+    pageSize.addEventListener('change', async (event) => {
+      state.hqa.pageSize = Number(event.target.value || 50);
+      state.hqa.page = 1;
+      await loadActiveListings();
+    });
   }
 
   const retryReport = document.getElementById('retry-report');
@@ -2710,6 +2743,10 @@ async function renderSystem(content) {
   } catch (reason) {
     content.innerHTML = `<div class="error">${escapeHtml(reason.message)}</div>`;
   }
+}
+
+if (typeof window !== 'undefined') {
+  window.__hqaState = state;
 }
 
 bootstrap();
