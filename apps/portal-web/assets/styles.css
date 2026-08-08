@@ -19,6 +19,10 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 .sidebar-user { margin-top: auto; display: grid; gap: 6px; }.sidebar-user span { color: #9aa7bd; font-size: 12px; }.sidebar-user button { margin-top: 8px; background: #253149; }
 .content { padding: 36px; overflow: hidden; }.page-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }.page-heading h1 { margin: 3px 0 0; }.eyebrow { color: #2456e6; text-transform: uppercase; font-size: 12px; letter-spacing: .12em; font-weight: 900; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }.metric-card { background: white; border: 1px solid #e3e8f0; border-radius: 16px; padding: 20px; display: grid; gap: 10px; }.metric-card span { color: #667085; }.metric-card strong { font-size: 30px; }.metric-card small { color: #8791a4; font-size: 12px; line-height: 1.4; }
+.metric-card__label { color: #667085; }
+.metric-card__value { color: #172033; }
+.metric-card__detail { color: #8791a4; font-size: 12px; line-height: 1.4; }
+.metric-card__detail--empty { visibility: hidden; }
 .panel { background: white; border: 1px solid #e3e8f0; border-radius: 16px; padding: 20px; margin-bottom: 20px; }.filters { display: grid; grid-template-columns: minmax(220px, 1fr) 200px auto; gap: 12px; margin-bottom: 18px; }
 .table-wrap { overflow: auto; }table { width: 100%; border-collapse: collapse; }th, td { padding: 14px 12px; text-align: left; border-bottom: 1px solid #edf0f5; white-space: nowrap; }th { color: #667085; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }td strong, td small { display: block; }td small { color: #8791a4; margin-top: 4px; }.chip { background: #eef3ff; color: #2456e6; border-radius: 999px; padding: 5px 9px; font-weight: 800; text-transform: uppercase; font-size: 11px; }
 .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 18px; }.job-list { display: grid; gap: 8px; }.job-list > div { display: grid; grid-template-columns: 1fr 120px 100px; padding: 12px; border-radius: 10px; background: #f7f9fc; }
@@ -45,6 +49,43 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 }
 .hqa-reports-screen .page-heading p { margin: 8px 0 0; color: #667085; }
 .hqa-reports-screen .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.hqa-reports-screen #hqa-summary .metric-card--summary {
+	min-height: 164px;
+	padding: 22px 18px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	gap: 8px;
+	border-top: 4px solid var(--metric-accent, #2563eb);
+	background: var(--metric-tint, #ffffff);
+}
+.hqa-reports-screen #hqa-summary .metric-card--summary .metric-card__label {
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.35;
+	color: #475569;
+}
+.hqa-reports-screen #hqa-summary .metric-card--summary .metric-card__value {
+	font-size: 32px;
+	font-weight: 800;
+	line-height: 1.1;
+	color: var(--metric-accent, #2563eb);
+}
+.hqa-reports-screen #hqa-summary .metric-card--summary .metric-card__detail {
+	min-height: 18px;
+	margin-top: 4px;
+	font-size: 12px;
+	line-height: 1.4;
+	text-align: center;
+	color: #64748b;
+}
+.hqa-reports-screen #hqa-summary .metric-card--total { --metric-accent: #2563eb; --metric-tint: #eff6ff; }
+.hqa-reports-screen #hqa-summary .metric-card--filtered { --metric-accent: #7c3aed; --metric-tint: #f5f3ff; }
+.hqa-reports-screen #hqa-summary .metric-card--active { --metric-accent: #16a34a; --metric-tint: #f0fdf4; }
+.hqa-reports-screen #hqa-summary .metric-card--ended { --metric-accent: #64748b; --metric-tint: #f8fafc; }
+.hqa-reports-screen #hqa-summary .metric-card--out { --metric-accent: #dc2626; --metric-tint: #fef2f2; }
 .hqa-toast-host { position: sticky; top: 8px; display: flex; justify-content: flex-end; z-index: 30; }
 .hqa-toast { display: inline-flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid transparent; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12); background: #ffffff; }
 .hqa-toast button { background: transparent; color: inherit; border: 1px solid currentColor; padding: 4px 8px; border-radius: 8px; font-size: 12px; }

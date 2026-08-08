@@ -1370,11 +1370,11 @@ function renderHqaSummary() {
   if (!summaryContainer) return;
   const allSummary = state.hqa.allListings.summary || {};
   summaryContainer.innerHTML = `
-    ${metric('Total records stored', allSummary.total_records_stored || 0, `Unique listing IDs: ${allSummary.unique_listing_ids || 0}`)}
-    ${metric('Filtered records', allSummary.filtered_records || 0)}
-    ${metric('Active', allSummary.active || 0)}
-    ${metric('Ended', allSummary.ended || 0)}
-    ${metric('Out of stock', allSummary.out_of_stock || 0)}`;
+    ${metric('Total records stored', allSummary.total_records_stored || 0, `Unique listing IDs: ${allSummary.unique_listing_ids || 0}`, 'metric-card--summary metric-card--total', true)}
+    ${metric('Filtered records', allSummary.filtered_records || 0, '', 'metric-card--summary metric-card--filtered', true)}
+    ${metric('Active', allSummary.active || 0, '', 'metric-card--summary metric-card--active', true)}
+    ${metric('Ended', allSummary.ended || 0, '', 'metric-card--summary metric-card--ended', true)}
+    ${metric('Out of stock', allSummary.out_of_stock || 0, '', 'metric-card--summary metric-card--out', true)}`;
 }
 
 function cloneAllListingsFilters(filters) {
@@ -2108,8 +2108,14 @@ function formatMetricValue(value) {
   return escapeHtml(value);
 }
 
-function metric(label, value, detail = '') {
-  return `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${formatMetricValue(value)}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ''}</article>`;
+function metric(label, value, detail = '', className = '', reserveDetailSpace = false) {
+  const normalizedClassName = String(className || '').trim();
+  const classes = ['metric-card'];
+  if (normalizedClassName) classes.push(normalizedClassName);
+  const detailMarkup = detail
+    ? `<small class="metric-card__detail">${escapeHtml(detail)}</small>`
+    : (reserveDetailSpace ? '<small class="metric-card__detail metric-card__detail--empty" aria-hidden="true">&nbsp;</small>' : '');
+  return `<article class="${classes.join(' ')}"><span class="metric-card__label">${escapeHtml(label)}</span><strong class="metric-card__value">${formatMetricValue(value)}</strong>${detailMarkup}</article>`;
 }
 
 function formatPrice(price, currency) {
