@@ -89,6 +89,12 @@ assert(source.includes('appliedFilters'), 'Dashboard state must use shared appli
 assert(source.includes('draftFilters'), 'Dashboard state must use shared draft filters');
 assert(source.includes('id="dashboard-seller-stats-filters"'), 'Dashboard must render seller stats date filter form');
 assert(source.includes('Total Sellers'), 'Dashboard must render Total Sellers KPI card');
+assert(source.includes("renderEndedOutOfStockSummaryCard"), 'All Listings summary must render combined ended/out-of-stock card helper');
+assert(source.includes("Ended / Out of stock"), 'All Listings summary must show combined ended/out-of-stock label');
+assert(source.includes("metric('Accessories', allSummary.accessories || 0"), 'All Listings summary must render accessories KPI');
+assert(styles.includes('.metric-card--status-combined'), 'Combined summary card styles must exist');
+assert(styles.includes('.metric-card__split'), 'Combined summary card split layout styles must exist');
+assert(styles.includes('.metric-card--accessories'), 'Accessories summary card styles must exist');
 
 assert(source.includes('/hqa/data-check/duplicates/summary'), 'Data check summary API must be used');
 assert(source.includes('/hqa/data-check/duplicates?${buildDataCheckParams(page).toString()}'), 'Data check duplicate groups API must be used');

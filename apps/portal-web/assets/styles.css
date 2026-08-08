@@ -86,6 +86,45 @@ input, select { border: 1px solid #d9e0ec; border-radius: 10px; padding: 11px 12
 .hqa-reports-screen #hqa-summary .metric-card--active { --metric-accent: #16a34a; --metric-tint: #f0fdf4; }
 .hqa-reports-screen #hqa-summary .metric-card--ended { --metric-accent: #64748b; --metric-tint: #f8fafc; }
 .hqa-reports-screen #hqa-summary .metric-card--out { --metric-accent: #dc2626; --metric-tint: #fef2f2; }
+.hqa-reports-screen #hqa-summary .metric-card--accessories { --metric-accent: #d97706; --metric-tint: #fff7ed; }
+.hqa-reports-screen #hqa-summary .metric-card--status-combined {
+	--metric-accent: #64748b;
+	--metric-tint: #f8fafc;
+	gap: 10px;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__label {
+	margin-bottom: 2px;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split {
+	width: 100%;
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	align-items: stretch;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	min-height: 72px;
+	padding: 2px 8px;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item + .metric-card__split-item {
+	border-left: 1px solid #dbe2ea;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item--ended .metric-card__value,
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item--ended .metric-card__detail {
+	color: #64748b;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item--out .metric-card__value,
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item--out .metric-card__detail {
+	color: #dc2626;
+}
+.hqa-reports-screen #hqa-summary .metric-card--status-combined .metric-card__split-item .metric-card__detail {
+	min-height: 16px;
+	margin-top: 0;
+}
 .hqa-toast-host { position: sticky; top: 8px; display: flex; justify-content: flex-end; z-index: 30; }
 .hqa-toast { display: inline-flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid transparent; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12); background: #ffffff; }
 .hqa-toast button { background: transparent; color: inherit; border: 1px solid currentColor; padding: 4px 8px; border-radius: 8px; font-size: 12px; }

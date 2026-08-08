@@ -1373,8 +1373,24 @@ function renderHqaSummary() {
     ${metric('Total records stored', allSummary.total_records_stored || 0, `Unique listing IDs: ${allSummary.unique_listing_ids || 0}`, 'metric-card--summary metric-card--total', true)}
     ${metric('Filtered records', allSummary.filtered_records || 0, '', 'metric-card--summary metric-card--filtered', true)}
     ${metric('Active', allSummary.active || 0, '', 'metric-card--summary metric-card--active', true)}
-    ${metric('Ended', allSummary.ended || 0, '', 'metric-card--summary metric-card--ended', true)}
-    ${metric('Out of stock', allSummary.out_of_stock || 0, '', 'metric-card--summary metric-card--out', true)}`;
+    ${renderEndedOutOfStockSummaryCard(allSummary.ended || 0, allSummary.out_of_stock || 0)}
+    ${metric('Accessories', allSummary.accessories || 0, '', 'metric-card--summary metric-card--accessories', true)}`;
+}
+
+function renderEndedOutOfStockSummaryCard(ended, outOfStock) {
+  return `<article class="metric-card metric-card--summary metric-card--status-combined" aria-label="Ended and out-of-stock summary">
+    <span class="metric-card__label">Ended / Out of stock</span>
+    <div class="metric-card__split" role="group" aria-label="Ended and out-of-stock counts">
+      <div class="metric-card__split-item metric-card__split-item--ended">
+        <strong class="metric-card__value">${formatMetricValue(ended)}</strong>
+        <small class="metric-card__detail">Ended</small>
+      </div>
+      <div class="metric-card__split-item metric-card__split-item--out">
+        <strong class="metric-card__value">${formatMetricValue(outOfStock)}</strong>
+        <small class="metric-card__detail">Out of stock</small>
+      </div>
+    </div>
+  </article>`;
 }
 
 function cloneAllListingsFilters(filters) {
@@ -2029,7 +2045,7 @@ function renderLogin(error = '') {
     <main class="login-shell">
       <form class="login-card" id="login-form">
         <div class="brand-mark">HQ</div>
-        <h1>HQ Platform</h1>
+        <h1>Hệ thống</h1>
         <p>Sign in to access assigned modules.</p>
         <label>Email<input id="email" value="" type="email" autocomplete="username" required></label>
         <label>Password<input id="password" value="ChangeMe123!" type="password" required></label>

@@ -33,6 +33,12 @@ ALLOWED_FILTER_FIELDS = {
 }
 DEFAULT_FILTER_OPTION_PAGE_SIZE = 30
 MAX_FILTER_OPTION_PAGE_SIZE = 100
+ACCESSORIES_CATEGORY_NAMES = (
+    "other vintage audio & video",
+    "other vintage a/v parts & accs",
+    "knobs, jacks & switches",
+    "cases, covers & skins",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1981,6 +1987,7 @@ def fetch_all_listings_summary(
     scope = statement.subquery("summary_scope")
 
     status_expr = func.lower(func.trim(func.coalesce(scope.c.listing_status, "")))
+    category_expr = func.rtrim(func.lower(func.trim(func.coalesce(scope.c.category_name, ""))), ".")
     row = db.execute(
         select(
             func.count().label("filtered_records"),
@@ -1988,6 +1995,7 @@ def fetch_all_listings_summary(
             func.coalesce(func.sum(case((status_expr == "active", 1), else_=0)), 0).label("active"),
             func.coalesce(func.sum(case((status_expr.in_(["ended", "end"]), 1), else_=0)), 0).label("ended"),
             func.coalesce(func.sum(case((status_expr == "out_of_stock", 1), else_=0)), 0).label("out_of_stock"),
+            func.coalesce(func.sum(case((category_expr.in_(ACCESSORIES_CATEGORY_NAMES), 1), else_=0)), 0).label("accessories"),
         )
     ).mappings().one()
 
@@ -2012,6 +2020,7 @@ def fetch_all_listings_summary(
         "active": int(row["active"] or 0),
         "ended": int(row["ended"] or 0),
         "out_of_stock": int(row["out_of_stock"] or 0),
+        "accessories": int(row["accessories"] or 0),
     }
 
 

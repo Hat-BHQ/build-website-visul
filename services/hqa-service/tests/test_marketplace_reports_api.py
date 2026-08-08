@@ -1134,6 +1134,9 @@ def test_all_listings_summary_and_export(client):
     assert "total_records_stored" in summary_payload
     assert "filtered_records" in summary_payload
     assert "active" in summary_payload
+    assert "ended" in summary_payload
+    assert "out_of_stock" in summary_payload
+    assert "accessories" in summary_payload
 
     assert export.status_code == 200
     assert export.headers["content-type"].startswith("text/csv")
@@ -1151,6 +1154,28 @@ def test_all_listings_summary_and_export_share_multi_filters(client):
     if export.status_code == 200:
         assert export.headers["content-type"].startswith("text/csv")
         assert "listing_id" in export.text
+
+
+def test_all_listings_summary_accessories_count_matches_seed(client):
+    summary = client.get("/internal/v1/hqa/listings/summary")
+    assert summary.status_code == 200
+    payload = summary.json()
+    assert payload["accessories"] == 1
+    assert payload["ended"] == 3
+    assert payload["out_of_stock"] == 2
+
+
+def test_all_listings_summary_accessories_respects_filter_scope(client):
+    summary_with_accessories = client.get("/internal/v1/hqa/listings/summary?category_name=knobs,%20jacks%20%26%20switches")
+    assert summary_with_accessories.status_code == 200
+    payload_accessories = summary_with_accessories.json()
+    assert payload_accessories["filtered_records"] == 1
+    assert payload_accessories["accessories"] == 1
+
+    summary_without_accessories = client.get("/internal/v1/hqa/listings/summary?brand=jbl")
+    assert summary_without_accessories.status_code == 200
+    payload_without_accessories = summary_without_accessories.json()
+    assert payload_without_accessories["accessories"] == 0
 
 
 def test_all_listings_rejects_invalid_price_range(client):
