@@ -418,3 +418,29 @@ def test_hqa_dashboard_export_route_relays_csv(monkeypatch):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
     assert "col1,col2" in response.text
+
+def test_hqa_dashboard_analysis_proxy_forwards_aggregation_and_filters(monkeypatch):
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    FakeAsyncClient.calls = []
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/hqa/dashboard/analysis"
+            "?marketplace=ebay"
+            "&condition=used"
+            "&condition=refurbished"
+            "&status=active"
+            "&group_by=model"
+            "&granularity=month",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+    assert response.status_code == 200
+    call = FakeAsyncClient.calls[-1]
+    assert call["url"] == "http://hqa-service:8000/internal/v1/hqa/dashboard/analysis"
+    assert call["headers"]["Authorization"] == "Bearer valid-token"
+    assert _param_values(call, "marketplace") == ["ebay"]
+    assert _param_values(call, "condition") == ["used", "refurbished"]
+    assert _param_values(call, "status") == ["active"]
+    assert _param_values(call, "group_by") == ["model"]
+    assert _param_values(call, "granularity") == ["month"]

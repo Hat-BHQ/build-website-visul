@@ -1199,6 +1199,39 @@ def test_hqa_dashboard_filter_options_returns_db_driven_options(client):
     assert payload["options"]["sellers"]
 
 
+def test_hqa_dashboard_analysis_returns_model_period_metrics(client):
+    response = client.get(
+        "/internal/v1/hqa/dashboard/analysis?date_from=2026-07-01&date_to=2026-08-31&group_by=model&granularity=month&condition=used"
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["group_by"] == "model"
+    assert payload["granularity"] == "month"
+    assert isinstance(payload["periods"], list)
+    assert isinstance(payload["groups"], list)
+    assert isinstance(payload["group_periods"], list)
+    assert isinstance(payload["alerts"], list)
+    assert payload["meta"]["source_table"] == "public.marketplace_research_results"
+    if payload["latest_period"]:
+        latest = payload["latest_period"]
+        assert "listing_count" in latest
+        assert "unique_ids" in latest
+        assert "seller_count" in latest
+        assert "median_price" in latest
+        assert "out_of_stock_count" in latest
+        assert "out_of_stock_pct" in latest
+        assert "model_count" in latest
+    if payload["group_periods"]:
+        row = payload["group_periods"][0]
+        for key in (
+            "group", "period", "listing_count", "unique_ids", "seller_count",
+            "min_price", "p25", "median_price", "avg_price", "p75", "max_price",
+            "std", "cv", "out_of_stock_count", "out_of_stock_pct",
+            "new_seller_count", "new_sellers", "top_sellers", "currency",
+        ):
+            assert key in row
+
+
 def test_hqa_dashboard_total_sellers_endpoint(client):
     response = client.get("/internal/v1/hqa/dashboard/sellers/total")
     assert response.status_code == 200

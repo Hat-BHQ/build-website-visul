@@ -254,6 +254,7 @@ function createJsonResponse(payload, status = 200) {
   assert(cancelButton.disabled === true, 'Cancel button must be disabled while cleanup request is running');
   assert(confirmButton.disabled === true, 'Confirm button must be disabled while cleanup request is running');
 
+  await wait(35);
   await flush(15);
   assert(cleanupCallCount === 1, 'Cleanup API must be called exactly once after valid confirmation');
   assert(!document.querySelector('.data-check-modal-backdrop'), 'Modal must close after successful cleanup');

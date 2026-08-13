@@ -81,55 +81,28 @@ const state = {
     },
     dashboard: {
       loading: false,
-      sellerStatsLoading: false,
-      loadingOptions: false,
       isExporting: false,
       error: '',
-      sellerStatsError: '',
-      optionsError: '',
-      sectionErrors: {},
-      sellerStats: {
-        totalSellers: null,
-        dateFrom: '',
-        dateTo: '',
-        appliedDateFrom: '',
-        appliedDateTo: '',
-      },
-      filterOptions: {
+      appliedFilters: {
+        keyword: '',
         marketplaces: [],
         brands: [],
         models: [],
-        currencies: [],
-      },
-      appliedFilters: {
-        keyword: '',
-        marketplace: '',
-        brand: '',
-        model: '',
-        currency: '',
+        conditions: [],
+        statuses: [],
+        categoryNames: [],
+        buyingOptions: [],
         dateFrom: '',
         dateTo: '',
-        groupBy: 'month',
         minPrice: '',
         maxPrice: '',
-      },
-      draftFilters: {
-        keyword: '',
-        marketplace: '',
-        brand: '',
-        model: '',
         currency: '',
-        dateFrom: '',
-        dateTo: '',
-        groupBy: 'month',
-        minPrice: '',
-        maxPrice: '',
       },
-      summary: null,
-      sellerTrend: { points: [] },
-      priceTrend: { points: [] },
-      priceComparison: { compare_by: 'brand', items: [] },
-      alerts: { alerts: [] },
+      analysis: null,
+      groupBy: 'model',
+      granularity: 'month',
+      selectedModel: '',
+      selectedPeriod: '',
     },
     dataCheck: {
       hasRun: false,
@@ -559,299 +532,630 @@ function renderHqaMainTabVisibility() {
   dataCheckView.hidden = !isDataCheck;
 }
 
-function buildDashboardCommonParams(filters) {
+function appendDashboardArrayParams(params, key, values) {
+  const normalizedValues = Array.isArray(values) ? values : (values ? [values] : []);
+  normalizedValues.forEach((value) => {
+    const normalized = String(value || '').trim();
+    if (normalized) params.append(key, normalized);
+  });
+}
+
+function syncDashboardFiltersFromAllListings() {
+  const source = state.hqa.allListings.appliedFilters || {};
+  state.hqa.dashboard.appliedFilters = {
+    keyword: source.search || '',
+    marketplaces: source.marketplace ? [source.marketplace] : [],
+    brands: source.brand ? [source.brand] : [],
+    models: source.model ? [source.model] : [],
+    conditions: Array.isArray(source.conditions) ? [...source.conditions] : [],
+    statuses: Array.isArray(source.statuses) ? [...source.statuses] : [],
+    categoryNames: Array.isArray(source.categoryNames) ? [...source.categoryNames] : [],
+    buyingOptions: Array.isArray(source.buyingOptions) ? [...source.buyingOptions] : [],
+    dateFrom: source.fromDate || '',
+    dateTo: source.toDate || '',
+    minPrice: source.minPrice ?? '',
+    maxPrice: source.maxPrice ?? '',
+    currency: '',
+  };
+}
+
+function buildDashboardCommonParams(filters = state.hqa.dashboard.appliedFilters) {
   const params = new URLSearchParams();
-  if (filters.keyword) params.set('keyword', filters.keyword.trim());
-  if (filters.marketplace) params.append('marketplace', filters.marketplace.trim());
-  if (filters.brand) params.append('brand', filters.brand.trim());
-  if (filters.model) params.append('model', filters.model.trim());
-  if (filters.currency) params.set('currency', filters.currency.trim());
+  if (filters.keyword) params.set('keyword', String(filters.keyword).trim());
+  appendDashboardArrayParams(params, 'marketplace', filters.marketplaces);
+  appendDashboardArrayParams(params, 'brand', filters.brands);
+  appendDashboardArrayParams(params, 'model', filters.models);
+  appendDashboardArrayParams(params, 'condition', filters.conditions);
+  appendDashboardArrayParams(params, 'status', filters.statuses);
+  appendDashboardArrayParams(params, 'category_name', filters.categoryNames);
+  appendDashboardArrayParams(params, 'buying_option', filters.buyingOptions);
+  if (filters.currency) params.set('currency', String(filters.currency).trim());
   if (filters.dateFrom) params.set('date_from', filters.dateFrom);
   if (filters.dateTo) params.set('date_to', filters.dateTo);
-  if (filters.minPrice !== '') params.set('min_price', String(filters.minPrice).trim());
-  if (filters.maxPrice !== '') params.set('max_price', String(filters.maxPrice).trim());
-  if (filters.groupBy) params.set('group_by', filters.groupBy);
+  if (filters.minPrice !== '' && filters.minPrice !== null && filters.minPrice !== undefined) params.set('min_price', String(filters.minPrice).trim());
+  if (filters.maxPrice !== '' && filters.maxPrice !== null && filters.maxPrice !== undefined) params.set('max_price', String(filters.maxPrice).trim());
   return params;
 }
 
-function buildDashboardAppliedParams() {
-  return buildDashboardCommonParams(state.hqa.dashboard.appliedFilters);
-}
+const DASHBOARD_FIELD_MAP = {
+  recordId: 'id',
+  listingId: 'listing_id',
+  marketplace: 'marketplace',
+  brand: 'brand',
+  model: 'model',
+  category: 'category_name',
+  condition: 'condition',
+  status: 'listing_status',
+  price: 'price',
+  seller: 'seller_or_shop',
+  title: 'listing_title',
+  quantity: 'quantity',
+  collectedAt: 'collected_at',
+  researchDate: 'research_date',
+  publishedAt: 'listing_published_at',
+  lastCheckedAt: 'last_status_checked_at',
+  url: 'listing_url',
+  currency: 'currency',
+};
 
-function buildDashboardSellerStatsParams(filters) {
-  const params = new URLSearchParams();
-  if (filters.dateFrom) params.set('date_from', filters.dateFrom);
-  if (filters.dateTo) params.set('date_to', filters.dateTo);
-  return params;
-}
+const DASHBOARD_CONFIG = {
+  groupBy: 'model',
+  granularity: 'month',
+  defaultCurrency: 'USD',
+  supportedCurrencies: ['USD', 'VND'],
+  priceDropWarningPct: 20,
+  priceDropCriticalPct: 30,
+  outOfStockWarningPoints: 30,
+  outOfStockCriticalPoints: 50,
+  colors: ['#2F6BE4', '#7C5CFC', '#16A34A', '#F59E0B', '#475569', '#EF4444', '#0891B2', '#C026D3', '#0F766E', '#C2410C'],
+  dashPatterns: [[], [7, 4], [2, 3], [9, 3, 2, 3], [12, 4], [4, 3], [10, 2], [2, 2, 8, 2], [6, 2, 2, 2], [14, 4]],
+  pointStyles: ['circle', 'rect', 'triangle', 'rectRot', 'star', 'crossRot', 'cross', 'rectRounded', 'dash', 'line'],
+};
 
-async function loadHqaDashboardSellerStats() {
-  state.hqa.dashboard.sellerStatsLoading = true;
-  state.hqa.dashboard.sellerStatsError = '';
-  try {
-    const filters = state.hqa.dashboard.sellerStats;
-    const params = buildDashboardSellerStatsParams(filters).toString();
-    const suffix = params ? `?${params}` : '';
-    const payload = await api(`/hqa/dashboard/sellers/total${suffix}`);
-    const totalSellers = Object.prototype.hasOwnProperty.call(payload || {}, 'total_sellers')
-      ? Number(payload.total_sellers)
-      : null;
-    state.hqa.dashboard.sellerStats = {
-      ...state.hqa.dashboard.sellerStats,
-      totalSellers: Number.isFinite(totalSellers) ? totalSellers : null,
-      appliedDateFrom: payload.date_from || '',
-      appliedDateTo: payload.date_to || '',
-    };
-  } catch (error) {
-    state.hqa.dashboard.sellerStatsError = error.message || 'Could not load total sellers.';
-    state.hqa.dashboard.sellerStats = {
-      ...state.hqa.dashboard.sellerStats,
-      totalSellers: null,
-    };
-  } finally {
-    state.hqa.dashboard.sellerStatsLoading = false;
-  }
-}
-
-async function loadHqaDashboardFilterOptions() {
-  state.hqa.dashboard.loadingOptions = true;
-  state.hqa.dashboard.optionsError = '';
-  try {
-    const draft = state.hqa.dashboard.draftFilters;
-    const params = buildDashboardCommonParams(draft);
-    const payload = await api(`/hqa/dashboard/filter-options?${params.toString()}`);
-    state.hqa.dashboard.filterOptions = payload.options || {};
-  } catch (error) {
-    state.hqa.dashboard.optionsError = error.message || 'Could not load dashboard filter options.';
-  } finally {
-    state.hqa.dashboard.loadingOptions = false;
-  }
-}
+let hqaDashboardCharts = [];
 
 async function loadHqaDashboardData() {
   state.hqa.dashboard.loading = true;
   state.hqa.dashboard.error = '';
-  const params = buildDashboardAppliedParams().toString();
-  const suffix = params ? `?${params}` : '';
+  try {
+    const params = buildDashboardCommonParams();
+    params.set('group_by', state.hqa.dashboard.groupBy || DASHBOARD_CONFIG.groupBy);
+    params.set('granularity', state.hqa.dashboard.granularity || DASHBOARD_CONFIG.granularity);
+    params.set('price_drop_warning_pct', String(DASHBOARD_CONFIG.priceDropWarningPct));
+    params.set('price_drop_critical_pct', String(DASHBOARD_CONFIG.priceDropCriticalPct));
+    params.set('out_of_stock_warning_points', String(DASHBOARD_CONFIG.outOfStockWarningPoints));
+    params.set('out_of_stock_critical_points', String(DASHBOARD_CONFIG.outOfStockCriticalPoints));
+    const payload = await api(`/hqa/dashboard/analysis?${params.toString()}`);
+    state.hqa.dashboard.analysis = payload;
 
-  const requests = [
-    { key: 'summary', path: `/hqa/dashboard/summary${suffix}` },
-    { key: 'sellerTrend', path: `/hqa/dashboard/seller-trend${suffix}` },
-    { key: 'priceTrend', path: `/hqa/dashboard/price-trend${suffix}` },
-    { key: 'priceComparison', path: `/hqa/dashboard/price-comparison${suffix}` },
-    { key: 'alerts', path: `/hqa/dashboard/alerts${suffix}` },
-  ];
-
-  const results = await Promise.allSettled(requests.map((request) => api(request.path)));
-  const sectionErrors = {};
-  requests.forEach((request, index) => {
-    const result = results[index];
-    if (result.status === 'fulfilled') {
-      state.hqa.dashboard[request.key] = result.value;
-      return;
+    const groups = payload.groups || [];
+    const periods = payload.periods || [];
+    if (!groups.includes(state.hqa.dashboard.selectedModel)) {
+      state.hqa.dashboard.selectedModel = groups[0] || '';
     }
-    sectionErrors[request.key] = result.reason?.message || 'Failed to load section.';
+    if (!periods.includes(state.hqa.dashboard.selectedPeriod)) {
+      state.hqa.dashboard.selectedPeriod = payload.latest_period?.period || periods[periods.length - 1] || '';
+    }
+  } catch (error) {
+    state.hqa.dashboard.error = error.message || 'Could not load dashboard analytics.';
+    state.hqa.dashboard.analysis = null;
+  } finally {
+    state.hqa.dashboard.loading = false;
+  }
+}
+
+function formatDashboardCurrency(value, currency = DASHBOARD_CONFIG.defaultCurrency) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return '—';
+  const cleanedCurrency = String(currency || 'USD').trim().toUpperCase();
+  if (cleanedCurrency === 'MIXED' || cleanedCurrency === 'UNKNOWN') {
+    return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(numericValue);
+  }
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: cleanedCurrency === 'VND' ? 'VND' : 'USD',
+      maximumFractionDigits: cleanedCurrency === 'VND' ? 0 : 2,
+    }).format(numericValue);
+  } catch (error) {
+    return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(numericValue);
+  }
+}
+
+function formatDashboardNumber(value, fractionDigits = 0) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return '—';
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(numericValue);
+}
+
+function dashboardPercentChange(currentValue, previousValue) {
+  const current = Number(currentValue);
+  const previous = Number(previousValue);
+  if (!Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) return null;
+  return ((current - previous) / previous) * 100;
+}
+
+function dashboardSeriesStyle(index) {
+  return {
+    color: DASHBOARD_CONFIG.colors[index % DASHBOARD_CONFIG.colors.length],
+    dash: DASHBOARD_CONFIG.dashPatterns[index % DASHBOARD_CONFIG.dashPatterns.length],
+    pointStyle: DASHBOARD_CONFIG.pointStyles[index % DASHBOARD_CONFIG.pointStyles.length],
+  };
+}
+
+function dashboardGroupPeriodMap(analysis) {
+  const map = new Map();
+  (analysis?.group_periods || []).forEach((item) => {
+    map.set(`${item.group}@@${item.period}`, item);
+  });
+  return map;
+}
+
+function getDashboardGroupPeriod(analysis, group, period) {
+  if (!analysis || !group || !period) return null;
+  return dashboardGroupPeriodMap(analysis).get(`${group}@@${period}`) || null;
+}
+
+function getDashboardPreviousPeriod(analysis, period) {
+  const periods = analysis?.periods || [];
+  const index = periods.indexOf(period);
+  return index > 0 ? periods[index - 1] : '';
+}
+
+function renderDashboardDelta(currentValue, previousValue, type, currency = 'USD', inverse = false) {
+  const current = Number(currentValue);
+  const previous = Number(previousValue);
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return '<span class="dashboard-delta dashboard-delta--muted">—</span>';
+  const delta = current - previous;
+  if (Math.abs(delta) < 0.0001) return '<span class="dashboard-delta dashboard-delta--muted">±0</span>';
+  const up = delta > 0;
+  const positive = inverse ? !up : up;
+  let value = '';
+  if (type === 'currency') value = formatDashboardCurrency(Math.abs(delta), currency);
+  else if (type === 'points') value = `${Math.abs(delta).toFixed(0)}đ%`;
+  else value = formatDashboardNumber(Math.abs(delta), 0);
+  return `<span class="dashboard-delta ${positive ? 'dashboard-delta--good' : 'dashboard-delta--bad'}">${up ? '▲' : '▼'} ${escapeHtml(value)}</span>`;
+}
+
+function renderDashboardRangeSvg(stats, color, currency) {
+  if (!stats || !Number.isFinite(Number(stats.min_price)) || !Number.isFinite(Number(stats.max_price))) {
+    return '<div class="empty-state">Không có đủ dữ liệu giá cho kỳ đã chọn.</div>';
+  }
+  const min = Number(stats.min_price);
+  const max = Number(stats.max_price);
+  const p25 = Number.isFinite(Number(stats.p25)) ? Number(stats.p25) : min;
+  const p75 = Number.isFinite(Number(stats.p75)) ? Number(stats.p75) : max;
+  const median = Number.isFinite(Number(stats.median_price)) ? Number(stats.median_price) : min;
+  const avg = Number.isFinite(Number(stats.avg_price)) ? Number(stats.avg_price) : median;
+  const width = 720;
+  const height = 96;
+  const left = 28;
+  const right = 28;
+  const y = 50;
+  const span = Math.max(max - min, 1);
+  const x = (value) => left + ((value - min) / span) * (width - left - right);
+  const tick = (value, label, below = false, strong = false) => {
+    const px = x(value);
+    return `<line x1="${px}" y1="${y - 7}" x2="${px}" y2="${y + 7}" stroke="${strong ? color : '#94A3B8'}" stroke-width="${strong ? 2 : 1}"/><text x="${px}" y="${below ? y + 24 : y - 15}" text-anchor="middle" fill="#64748B" font-size="10.5">${escapeHtml(label)}</text>`;
+  };
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="Dải giá thị trường từ ${escapeHtml(formatDashboardCurrency(min, currency))} đến ${escapeHtml(formatDashboardCurrency(max, currency))}" class="dashboard-range-svg"><rect x="${x(p25)}" y="${y - 10}" width="${Math.max(x(p75) - x(p25), 5)}" height="20" rx="4" fill="${color}" opacity="0.16"/><line x1="${x(min)}" y1="${y}" x2="${x(max)}" y2="${y}" stroke="#CBD5E1" stroke-width="2" stroke-linecap="round"/>${tick(min, formatDashboardCurrency(min, currency), true)}${tick(max, formatDashboardCurrency(max, currency), true)}${tick(median, `Trung vị ${formatDashboardCurrency(median, currency)}`, false, true)}<circle cx="${x(avg)}" cy="${y}" r="4.5" fill="${color}"/><text x="${x(avg)}" y="${y + 39}" text-anchor="middle" fill="${color}" font-size="10.5">TB ${escapeHtml(formatDashboardCurrency(avg, currency))}</text></svg>`;
+}
+
+function renderDashboardSparkline(statsRows, selectedPeriod, color) {
+  const usable = (statsRows || []).filter((row) => Number.isFinite(Number(row.avg_price)));
+  if (!usable.length) return '<div class="empty-state">Không có dữ liệu xu hướng giá.</div>';
+  const selectedIndex = Math.max(0, usable.findIndex((row) => row.period === selectedPeriod));
+  const endIndex = selectedIndex >= 0 ? selectedIndex : usable.length - 1;
+  const startIndex = Math.max(0, endIndex - 5);
+  const rows = usable.slice(startIndex, endIndex + 1);
+  const width = 320;
+  const height = 68;
+  const padding = 10;
+  const values = rows.map((row) => Number(row.avg_price));
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(max - min, 1);
+  const x = (index) => padding + (rows.length <= 1 ? 0 : (index / (rows.length - 1)) * (width - padding * 2));
+  const y = (value) => height - padding - ((value - min) / span) * (height - padding * 2);
+  const path = values.map((value, index) => `${index ? 'L' : 'M'} ${x(index).toFixed(1)} ${y(value).toFixed(1)}`).join(' ');
+  const circles = values.map((value, index) => {
+    const isSelected = rows[index]?.period === selectedPeriod;
+    return `<circle cx="${x(index)}" cy="${y(value)}" r="${isSelected ? 4.5 : 2.6}" fill="${isSelected ? color : '#94A3B8'}"><title>${escapeHtml(rows[index]?.period || '')}: ${escapeHtml(formatDashboardCurrency(value, rows[index]?.currency || 'USD'))}</title></circle>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="Xu hướng giá trung bình 6 kỳ" class="dashboard-sparkline"><path d="${path}" fill="none" stroke="${color}" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round"/>${circles}</svg>`;
+}
+
+function buildDashboardRecommendation(current, previous) {
+  if (!current || !Number.isFinite(Number(current.min_price)) || !Number.isFinite(Number(current.median_price)) || !Number.isFinite(Number(current.p75))) return null;
+  const fast = Number(current.min_price) * 0.97;
+  const balanced = Number(current.median_price);
+  const premium = Number(current.p75);
+  const priceChange = previous ? dashboardPercentChange(current.avg_price, previous.avg_price) : null;
+  let recommended = 'Cân bằng';
+  let reason = `Thị trường tương đối ổn định. Niêm yết quanh trung vị ${formatDashboardCurrency(balanced, current.currency)} để cân bằng tốc độ bán và lợi nhuận.`;
+
+  if (Number(current.out_of_stock_pct || 0) >= 40 || Number(current.seller_count || 0) <= 3) {
+    recommended = 'Lợi nhuận cao';
+    reason = `Nguồn cung đang hạn chế: hết hàng ${Number(current.out_of_stock_pct || 0).toFixed(0)}% và có ${formatDashboardNumber(current.seller_count || 0)} người bán. Có thể thử vùng P75 ${formatDashboardCurrency(premium, current.currency)}.`;
+  } else if (Number(current.new_seller_count || 0) >= 3 || (priceChange !== null && priceChange <= -15)) {
+    recommended = 'Bán nhanh';
+    const signals = [];
+    if (Number(current.new_seller_count || 0) >= 3) signals.push(`${current.new_seller_count} người bán mới`);
+    if (priceChange !== null && priceChange <= -15) signals.push(`giá TB giảm ${Math.abs(priceChange).toFixed(0)}%`);
+    reason = `Cạnh tranh đang nóng lên (${signals.join(', ')}). Mức ${formatDashboardCurrency(fast, current.currency)} giúp nổi bật hơn giá thấp nhất hiện tại.`;
+  }
+
+  return {
+    recommended,
+    reason,
+    items: [
+      { label: 'Bán nhanh', note: 'thấp hơn giá rẻ nhất ~3%', value: fast, color: '#16A34A' },
+      { label: 'Cân bằng', note: 'ngang trung vị thị trường', value: balanced, color: '#2F6BE4' },
+      { label: 'Lợi nhuận cao', note: 'nhóm giá cao P75', value: premium, color: '#F59E0B' },
+    ],
+  };
+}
+
+function renderDashboardTopSellers(items, color, currency, totalSellers) {
+  if (!items?.length) return '<div class="empty-state">Không có dữ liệu người bán cho Model + kỳ đã chọn.</div>';
+  const top = items.slice(0, 10);
+  const maxListings = Math.max(...top.map((item) => Number(item.listing_count || 0)), 1);
+  const priced = top.filter((item) => Number.isFinite(Number(item.min_price)));
+  const cheapest = priced.length ? Math.min(...priced.map((item) => Number(item.min_price))) : null;
+  return `
+    <div class="dashboard-top-sellers-heading"><span>Xếp theo số listing · thanh nền = mức áp đảo · <b class="dashboard-cheapest-mark">▼</b> = rẻ nhất</span><span>Tổng ${formatRecordCount(totalSellers || items.length)} người bán${Number(totalSellers || items.length) > 10 ? ' · hiện 10' : ''}</span></div>
+    <div class="dashboard-top-seller-grid dashboard-top-seller-grid--header"><span>#</span><span>Người bán</span><span>Listing</span><span>Giá TB</span><span>Rẻ nhất</span></div>
+    <div class="dashboard-top-seller-list">${top.map((item, index) => {
+      const minPrice = Number(item.min_price);
+      const isCheapest = cheapest !== null && Number.isFinite(minPrice) && minPrice <= cheapest + 0.001;
+      const width = Math.max(6, Math.round((Number(item.listing_count || 0) / maxListings) * 100));
+      return `<div class="dashboard-top-seller-row"><span class="dashboard-top-seller-fill" style="width:${width}%;background:${color};"></span><span class="dashboard-rank">${index + 1}</span><span class="dashboard-seller-name">${escapeHtml(item.seller || 'Unknown seller')}</span><span class="dashboard-seller-count">${formatRecordCount(item.listing_count || 0)}</span><span class="dashboard-seller-value">${formatDashboardCurrency(item.avg_price, currency)}</span><span class="dashboard-seller-min ${isCheapest ? 'dashboard-seller-min--lead' : ''}">${isCheapest ? '▼ rẻ nhất ' : ''}${formatDashboardCurrency(item.min_price, currency)}</span></div>`;
+    }).join('')}</div>`;
+}
+
+function renderDashboardAlerts(alerts) {
+  if (!alerts?.length) return '<div class="empty-state">Không phát hiện bất thường đáng kể ở kỳ mới nhất.</div>';
+  const meta = {
+    critical: { label: 'Nghiêm trọng', color: '#DC2626', bg: '#FEECEC', icon: '!' },
+    warning: { label: 'Đáng chú ý', color: '#C2610C', bg: '#FEF3E2', icon: '!' },
+    info: { label: 'Theo dõi', color: '#B0850A', bg: '#FEF9E7', icon: 'i' },
+  };
+  return `<div class="dashboard-alert-list dashboard-scroll">${alerts.map((alert) => {
+    const severity = meta[String(alert.severity || 'info').toLowerCase()] || meta.info;
+    let detail = alert.message || '';
+    if (alert.type === 'price_drop') detail = `Giá TB ${formatDashboardCurrency(alert.previous_avg_price, alert.currency || 'USD')} → ${formatDashboardCurrency(alert.current_avg_price, alert.currency || 'USD')} (${Number(alert.change_percent || 0).toFixed(1)}%).`;
+    if (alert.type === 'new_low') detail = `Thấp nhất ${formatDashboardCurrency(alert.current_min_price, alert.currency || 'USD')} · dưới đáy cũ ${formatDashboardCurrency(alert.previous_floor_price, alert.currency || 'USD')}.`;
+    if (alert.type === 'new_seller') detail = `${formatRecordCount(alert.new_seller_count || 0)} mới: ${(alert.new_sellers || []).slice(0, 4).map(escapeHtml).join(', ')}${Number(alert.new_seller_count || 0) > 4 ? '…' : ''}`;
+    if (alert.type === 'out_of_stock_spike') detail = `Hết hàng ${Number(alert.previous_out_of_stock_pct || 0).toFixed(0)}% → ${Number(alert.current_out_of_stock_pct || 0).toFixed(0)}% (+${Number(alert.change_points || 0).toFixed(0)}đ%).`;
+    return `<div class="dashboard-alert-item"><div class="dashboard-alert-icon" style="background:${severity.bg};color:${severity.color}">${severity.icon}</div><div class="dashboard-alert-copy"><strong>${escapeHtml(alert.title || 'Cảnh báo')}</strong><span>${escapeHtml(alert.group || '')}</span><small>${detail}</small></div><span class="dashboard-alert-severity" style="background:${severity.bg};color:${severity.color}">${severity.label}</span></div>`;
+  }).join('')}</div>`;
+}
+
+function buildDashboardLegendMarkup(groups) {
+  return (groups || []).map((group, index) => {
+    const style = dashboardSeriesStyle(index);
+    return `<span class="dashboard-legend-item"><i style="background:${style.color}"></i>${escapeHtml(group)}</span>`;
+  }).join('');
+}
+
+function destroyHqaDashboardCharts() {
+  hqaDashboardCharts.forEach((chart) => {
+    try { chart.destroy(); } catch (error) { /* no-op */ }
+  });
+  hqaDashboardCharts = [];
+}
+
+function renderDashboardCharts(analysis) {
+  if (typeof Chart === 'undefined' || !analysis?.periods?.length || !analysis?.groups?.length) return;
+  const map = dashboardGroupPeriodMap(analysis);
+  const labels = analysis.periods;
+  const groups = analysis.groups;
+  const baseOptions = (formatter) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: (context) => `${context.dataset.label}: ${formatter(context.parsed.y)}`,
+        },
+      },
+    },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: '#64748B', autoSkip: labels.length > 8, maxTicksLimit: 8 } },
+      y: { grid: { color: '#EDF1F7' }, border: { display: false }, ticks: { color: '#64748B', callback: formatter } },
+    },
   });
 
-  state.hqa.dashboard.sectionErrors = sectionErrors;
-  if (Object.keys(sectionErrors).length === requests.length) {
-    state.hqa.dashboard.error = 'Could not load dashboard.';
+  const buildDatasets = (field) => groups.map((group, index) => {
+    const style = dashboardSeriesStyle(index);
+    return {
+      label: group,
+      data: labels.map((period) => {
+        const row = map.get(`${group}@@${period}`);
+        const value = row ? Number(row[field]) : NaN;
+        return Number.isFinite(value) ? value : null;
+      }),
+      borderColor: style.color,
+      backgroundColor: style.color,
+      borderWidth: 2,
+      borderDash: style.dash,
+      pointStyle: style.pointStyle,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      tension: 0.28,
+      spanGaps: true,
+    };
+  });
+
+  const priceCanvas = document.getElementById('dashboard-price-chart');
+  if (priceCanvas) {
+    const currency = analysis.latest_period?.currency || 'USD';
+    hqaDashboardCharts.push(new Chart(priceCanvas, {
+      type: 'line',
+      data: { labels, datasets: buildDatasets('avg_price') },
+      options: baseOptions((value) => formatDashboardCurrency(value, currency)),
+    }));
   }
-  state.hqa.dashboard.loading = false;
+
+  const sellerCanvas = document.getElementById('dashboard-seller-chart');
+  if (sellerCanvas) {
+    hqaDashboardCharts.push(new Chart(sellerCanvas, {
+      type: 'line',
+      data: { labels, datasets: buildDatasets('seller_count') },
+      options: baseOptions((value) => formatDashboardNumber(value, 0)),
+    }));
+  }
 }
 
-function buildSimpleLineChart({ title, points, lines }) {
-  if (!points?.length) {
-    return `<article class="dashboard-chart"><header><h3>${escapeHtml(title)}</h3></header><div class="empty-state">No trend data in selected range.</div></article>`;
-  }
-  const width = 860;
-  const height = 260;
-  const padLeft = 50;
-  const padRight = 18;
-  const padTop = 22;
-  const padBottom = 48;
-  const allValues = [];
-  points.forEach((point) => lines.forEach((line) => allValues.push(Number(point[line.key] || 0))));
-  const max = Math.max(...allValues, 1);
-  const min = Math.min(...allValues, 0);
-  const xStep = points.length > 1 ? (width - padLeft - padRight) / (points.length - 1) : 0;
-  const yScale = (value) => {
-    if (max === min) return (height - padBottom + padTop) / 2;
-    return padTop + (max - value) * ((height - padTop - padBottom) / (max - min));
-  };
-
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-    const value = min + (max - min) * ratio;
-    const y = yScale(value);
-    return `<g><line x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" stroke="#E2E8F0" stroke-width="1" /><text x="${padLeft - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="#64748B">${Math.round(value)}</text></g>`;
-  }).join('');
-
-  const periodTicks = points.map((point, index) => {
-    const x = padLeft + (xStep * index);
-    return `<text x="${x}" y="${height - 20}" text-anchor="middle" font-size="11" fill="#64748B">${escapeHtml(point.period || '-')}</text>`;
-  }).join('');
-
-  const lineSvg = lines.map((line) => {
-    const path = points.map((point, index) => {
-      const x = padLeft + (xStep * index);
-      const y = yScale(Number(point[line.key] || 0));
-      return `${index === 0 ? 'M' : 'L'} ${x} ${y}`;
-    }).join(' ');
-    const circles = points.map((point, index) => {
-      const x = padLeft + (xStep * index);
-      const value = Number(point[line.key] || 0);
-      const y = yScale(value);
-      return `<circle cx="${x}" cy="${y}" r="4" fill="${line.color}"><title>${escapeHtml(point.period || '-')} ${line.label}: ${value.toLocaleString()}</title></circle>`;
-    }).join('');
-    return `<path d="${path}" fill="none" stroke="${line.color}" stroke-width="2.5"/>${circles}`;
-  }).join('');
-
-  return `
-    <article class="dashboard-chart">
-      <header>
-        <h3>${escapeHtml(title)}</h3>
-        <div class="dashboard-legend">${lines.map((line) => `<span><i style="background:${line.color}"></i>${escapeHtml(line.label)}</span>`).join('')}</div>
-      </header>
-      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)} chart">
-        ${yTicks}
-        ${lineSvg}
-        ${periodTicks}
-      </svg>
-    </article>`;
+function dashboardScopeSummary(filters) {
+  const parts = [];
+  if (filters.dateFrom || filters.dateTo) parts.push(`${filters.dateFrom || '...'} → ${filters.dateTo || '...'}`);
+  if (filters.marketplaces?.length) parts.push(`Marketplace: ${filters.marketplaces.join(', ')}`);
+  if (filters.brands?.length) parts.push(`Brand: ${filters.brands.join(', ')}`);
+  if (filters.models?.length) parts.push(`Model: ${filters.models.join(', ')}`);
+  if (filters.conditions?.length) parts.push(`Condition: ${filters.conditions.join(', ')}`);
+  if (filters.statuses?.length) parts.push(`Status: ${filters.statuses.join(', ')}`);
+  if (filters.categoryNames?.length) parts.push(`Category: ${filters.categoryNames.join(', ')}`);
+  if (filters.keyword) parts.push(`Search: ${filters.keyword}`);
+  return parts.length ? parts.join(' · ') : 'Toàn bộ dữ liệu đang có';
 }
 
-function dashboardStatusTable(points) {
-  if (!points?.length) return '<div class="empty-state">No status trend data.</div>';
-  return `<div class="table-wrap"><table><thead><tr><th>Month</th><th>Active</th><th>Ended</th><th>Out of stock</th><th>New listing</th><th>Unknown</th></tr></thead><tbody>${points.map((row) => `<tr><td>${escapeHtml(row.month || '-')}</td><td>${formatRecordCount(row.active || 0)}</td><td>${formatRecordCount(row.ended || 0)}</td><td>${formatRecordCount(row.out_of_stock || 0)}</td><td>${formatRecordCount(row.new_listing || 0)}</td><td>${formatRecordCount(row.unknown || 0)}</td></tr>`).join('')}</tbody></table></div>`;
+function dashboardCsvCell(value) {
+  if (value === null || value === undefined) return '';
+  const text = Array.isArray(value) ? value.join(' | ') : String(value);
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function downloadDashboardCsv(dataset) {
+  const analysis = state.hqa.dashboard.analysis;
+  if (!analysis) return;
+  let rows = [];
+  let filename = `hqa_dashboard_${dataset}.csv`;
+  if (dataset === 'group_period') {
+    rows = (analysis.group_periods || []).map((item) => ({
+      group: item.group,
+      period: item.period,
+      listing_count: item.listing_count,
+      unique_ids: item.unique_ids,
+      seller_count: item.seller_count,
+      price_sample: item.price_sample,
+      min_price: item.min_price,
+      p25: item.p25,
+      median_price: item.median_price,
+      avg_price: item.avg_price,
+      p75: item.p75,
+      max_price: item.max_price,
+      std: item.std,
+      cv: item.cv,
+      out_of_stock_count: item.out_of_stock_count,
+      out_of_stock_pct: item.out_of_stock_pct,
+      new_seller_count: item.new_seller_count,
+      currency: item.currency,
+    }));
+  } else if (dataset === 'alerts') {
+    rows = (analysis.alerts || []).map((item) => ({
+      severity: item.severity,
+      type: item.type,
+      group: item.group,
+      period: item.period,
+      currency: item.currency,
+      title: item.title,
+      message: item.message,
+      previous_avg_price: item.previous_avg_price,
+      current_avg_price: item.current_avg_price,
+      change_percent: item.change_percent,
+      current_min_price: item.current_min_price,
+      previous_floor_price: item.previous_floor_price,
+      new_seller_count: item.new_seller_count,
+      new_sellers: item.new_sellers || [],
+      previous_out_of_stock_pct: item.previous_out_of_stock_pct,
+      current_out_of_stock_pct: item.current_out_of_stock_pct,
+      change_points: item.change_points,
+    }));
+  } else if (dataset === 'top_sellers') {
+    const current = getDashboardGroupPeriod(analysis, state.hqa.dashboard.selectedModel, state.hqa.dashboard.selectedPeriod);
+    rows = (current?.top_sellers || []).slice(0, 10).map((item, index) => ({
+      rank: index + 1,
+      model: state.hqa.dashboard.selectedModel,
+      period: state.hqa.dashboard.selectedPeriod,
+      seller: item.seller,
+      listing_count: item.listing_count,
+      avg_price: item.avg_price,
+      min_price: item.min_price,
+      currency: current?.currency || '',
+    }));
+    filename = `hqa_dashboard_top10_${state.hqa.dashboard.groupBy || 'model'}_${state.hqa.dashboard.selectedModel || 'group'}_${state.hqa.dashboard.selectedPeriod || 'period'}.csv`;
+  }
+  if (!rows.length) {
+    state.hqa.dashboard.error = 'Không có dữ liệu để xuất CSV.';
+    renderHqaDashboard();
+    return;
+  }
+  const headers = Array.from(rows.reduce((set, row) => {
+    Object.keys(row).forEach((key) => set.add(key));
+    return set;
+  }, new Set()));
+  const csv = `\ufeff${headers.map(dashboardCsvCell).join(',')}\r\n${rows.map((row) => headers.map((header) => dashboardCsvCell(row[header])).join(',')).join('\r\n')}`;
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename.replace(/[^a-zA-Z0-9._-]+/g, '_');
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function renderHqaDashboard() {
   const dashboardView = document.getElementById('hqa-dashboard-view');
   if (!dashboardView) return;
+  destroyHqaDashboardCharts();
+
   const data = state.hqa.dashboard;
-  const sellerStats = data.sellerStats || {};
-  const sellerSummary = data.summary?.seller_analytics || {};
-  const priceSummary = data.summary?.price_analytics || {};
-  const comparisonItems = data.priceComparison?.items || [];
-  const alertItems = data.alerts?.alerts || [];
-  const options = data.filterOptions || {};
+  const analysis = data.analysis;
+  if (data.loading && !analysis) {
+    dashboardView.innerHTML = '<div class="dashboard-loading"><span class="loading-spinner" aria-hidden="true"></span><span>Đang phân tích dữ liệu Dashboard...</span></div>';
+    return;
+  }
+  if (!analysis) {
+    dashboardView.innerHTML = `${data.error ? `<div class="error">${escapeHtml(data.error)}</div>` : ''}<div class="empty-state">Chưa có dữ liệu Dashboard.</div>`;
+    return;
+  }
 
-  const dashboardSelectOptions = (items, selected = '') => {
-    const normalized = String(selected || '');
-    return (items || []).map((item) => `<option value="${escapeHtml(item)}" ${item === normalized ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('');
-  };
+  const latest = analysis.latest_period || {};
+  const groups = analysis.groups || [];
+  const periods = analysis.periods || [];
+  const selectedModel = groups.includes(data.selectedModel) ? data.selectedModel : (groups[0] || '');
+  const selectedPeriod = periods.includes(data.selectedPeriod) ? data.selectedPeriod : (latest.period || periods[periods.length - 1] || '');
+  state.hqa.dashboard.selectedModel = selectedModel;
+  state.hqa.dashboard.selectedPeriod = selectedPeriod;
 
-  const renderAlert = (alert) => {
-    const severity = String(alert?.severity || '').toLowerCase();
-    const severityLabel = severity === 'critical' ? 'CRITICAL' : severity === 'warning' ? 'WARNING' : 'INFO';
-    const toneClass = severity === 'critical' ? 'dashboard-alert-critical' : severity === 'warning' ? 'dashboard-alert-warning' : 'dashboard-alert-info';
-    const previousAvg = Number(alert?.previous_avg_price || 0);
-    const currentAvg = Number(alert?.current_avg_price || 0);
-    const changePercent = Number(alert?.change_percent || 0);
-    const priceChangeLine = previousAvg > 0 || currentAvg > 0
-      ? `<div class="dashboard-alert-detail">${formatRecordCount(previousAvg)} -> ${formatRecordCount(currentAvg)} (${changePercent.toFixed(2)}%)</div>`
-      : '';
-    return `<li class="dashboard-alert-item ${toneClass}"><div><strong>${escapeHtml(severityLabel)}</strong> ${escapeHtml(alert?.message || '')}</div>${priceChangeLine}</li>`;
-  };
+  const current = getDashboardGroupPeriod(analysis, selectedModel, selectedPeriod);
+  const previousPeriod = getDashboardPreviousPeriod(analysis, selectedPeriod);
+  const previous = previousPeriod ? getDashboardGroupPeriod(analysis, selectedModel, previousPeriod) : null;
+  const selectedGroupRows = (analysis.group_periods || []).filter((item) => item.group === selectedModel);
+  const selectedColor = dashboardSeriesStyle(Math.max(groups.indexOf(selectedModel), 0)).color;
+  const currency = current?.currency || latest.currency || 'USD';
+  const recommendation = buildDashboardRecommendation(current, previous);
+  const priceChange = previous ? dashboardPercentChange(current?.avg_price, previous?.avg_price) : null;
+  const groupBy = analysis.group_by || data.groupBy || 'model';
+  const granularity = analysis.granularity || data.granularity || 'month';
+  const groupLabel = groupBy === 'brand' ? 'Brand' : (groupBy === 'category' ? 'Category' : 'Model');
+  const periodLabel = granularity === 'week' ? 'tuần' : 'tháng';
+
+  const kpis = [
+    { label: 'Listing phân tích', value: formatRecordCount(latest.listing_count || 0), detail: `Unique IDs ${formatRecordCount(latest.unique_ids || 0)} · ${escapeHtml(latest.period || '—')}`, accent: '#2F6BE4' },
+    { label: 'Số Model', value: formatRecordCount(latest.model_count || 0), detail: 'trong kỳ mới nhất', accent: '#7C5CFC' },
+    { label: 'Người bán', value: formatRecordCount(latest.seller_count || 0), detail: 'distinct seller', accent: '#16A34A' },
+    { label: 'Giá trung vị', value: formatDashboardCurrency(latest.median_price, latest.currency || 'USD'), detail: 'toàn bộ listing có giá', accent: '#475569' },
+    { label: 'Hết hàng', value: formatRecordCount(latest.out_of_stock_count || 0), detail: `${Number(latest.out_of_stock_pct || 0).toFixed(1)}% listing`, accent: '#F59E0B', valueColor: '#EF4444' },
+  ];
 
   dashboardView.innerHTML = `
-    <div class="dashboard-header-row">
-      <h2>Marketplace Dashboard</h2>
-      <div class="dashboard-export-actions">
-        <button type="button" id="dashboard-drilldown" ${data.loading ? 'disabled' : ''}>Drill-down to Listings</button>
-        <select id="dashboard-export-dataset" ${data.loading ? 'disabled' : ''}>
-          <option value="summary">Summary</option>
-          <option value="seller_trend">Seller trend</option>
-          <option value="price_trend">Price trend</option>
-          <option value="price_comparison">Price comparison</option>
-          <option value="alerts">Alerts</option>
-        </select>
-        <button type="button" id="dashboard-export" ${(data.loading || data.isExporting) ? 'disabled' : ''}>${data.isExporting ? 'Exporting...' : 'Export CSV'}</button>
+    <div class="dashboard-action-row">
+      <div class="dashboard-scope-copy"><strong>Phạm vi Dashboard</strong><span>${escapeHtml(dashboardScopeSummary(data.appliedFilters))}</span></div>
+      <div class="dashboard-view-controls" aria-label="Tùy chọn phân tích Dashboard">
+        <label><span>Nhóm</span><select id="dashboard-group-by"><option value="model" ${groupBy === 'model' ? 'selected' : ''}>Model</option><option value="brand" ${groupBy === 'brand' ? 'selected' : ''}>Brand</option><option value="category" ${groupBy === 'category' ? 'selected' : ''}>Category</option></select></label>
+        <label><span>Kỳ</span><select id="dashboard-granularity"><option value="month" ${granularity === 'month' ? 'selected' : ''}>Tháng</option><option value="week" ${granularity === 'week' ? 'selected' : ''}>Tuần</option></select></label>
+      </div>
+      <div class="dashboard-export-actions" aria-label="Xuất dữ liệu Dashboard">
+        <button type="button" data-dashboard-export="group_period">Tổng hợp CSV</button>
+        <button type="button" data-dashboard-export="alerts">Cảnh báo CSV</button>
+        <button type="button" data-dashboard-export="top_sellers" ${current?.top_sellers?.length ? '' : 'disabled'}>Top 10 CSV</button>
       </div>
     </div>
-    <div class="panel dashboard-subpanel">
-      <h3>THONG KE NGUOI BAN</h3>
-      <form id="dashboard-seller-stats-filters" class="dashboard-seller-stats-filters">
-        <label class="form-field"><span>Date from</span><input id="dashboard-seller-stats-date-from" type="date" value="${escapeHtml(sellerStats.dateFrom || '')}"></label>
-        <label class="form-field"><span>Date to</span><input id="dashboard-seller-stats-date-to" type="date" value="${escapeHtml(sellerStats.dateTo || '')}"></label>
-        <button type="submit" ${data.sellerStatsLoading ? 'disabled' : ''}>${data.sellerStatsLoading ? 'Applying...' : 'Apply'}</button>
-        <button type="button" id="dashboard-seller-stats-reset" ${data.sellerStatsLoading ? 'disabled' : ''}>Reset</button>
-      </form>
-      ${data.sellerStatsError ? `<div class="error">${escapeHtml(data.sellerStatsError)}</div>` : ''}
-      <div class="metrics dashboard-metrics dashboard-seller-stats-metrics">
-        <article class="metric-card">
-          <span>Total Sellers</span>
-          <strong>${sellerStats.totalSellers === null ? '-' : formatRecordCount(sellerStats.totalSellers)}</strong>
-          <small>Nguoi ban trong database</small>
-        </article>
-      </div>
-    </div>
-    <form id="dashboard-filters" class="hqa-filter-grid dashboard-filter-grid" ${data.loading ? 'data-loading="true"' : ''}>
-      <h3 class="dashboard-filter-title">Dashboard Filters</h3>
-      <label class="form-field"><span>Keyword</span><input id="dashboard-keyword" placeholder="Keyword" value="${escapeHtml(data.draftFilters.keyword)}"></label>
-      <label class="form-field"><span>Marketplace</span><select id="dashboard-marketplace"><option value="">All marketplaces</option>${dashboardSelectOptions(options.marketplaces, data.draftFilters.marketplace)}</select></label>
-      <label class="form-field"><span>Brand</span><select id="dashboard-brand"><option value="">All brands</option>${dashboardSelectOptions(options.brands, data.draftFilters.brand)}</select></label>
-      <label class="form-field"><span>Model</span><select id="dashboard-model"><option value="">All models</option>${dashboardSelectOptions(options.models, data.draftFilters.model)}</select></label>
-      <label class="form-field"><span>Currency</span><select id="dashboard-currency"><option value="">Auto</option>${dashboardSelectOptions(options.currencies, data.draftFilters.currency)}</select></label>
-      <label class="form-field"><span>Date from</span><input id="dashboard-date-from" type="date" value="${escapeHtml(data.draftFilters.dateFrom)}"></label>
-      <label class="form-field"><span>Date to</span><input id="dashboard-date-to" type="date" value="${escapeHtml(data.draftFilters.dateTo)}"></label>
-      <label class="form-field"><span>Time grouping</span><select id="dashboard-group-by">
-        <option value="day" ${data.draftFilters.groupBy === 'day' ? 'selected' : ''}>Day</option>
-        <option value="week" ${data.draftFilters.groupBy === 'week' ? 'selected' : ''}>Week</option>
-        <option value="month" ${data.draftFilters.groupBy === 'month' ? 'selected' : ''}>Month</option>
-      </select></label>
-      <label class="form-field"><span>Min price</span><input id="dashboard-min-price" type="text" value="${escapeHtml(data.draftFilters.minPrice)}"></label>
-      <label class="form-field"><span>Max price</span><input id="dashboard-max-price" type="text" value="${escapeHtml(data.draftFilters.maxPrice)}"></label>
-      <div class="filter-actions"><button type="submit">Apply filters</button><button type="button" id="dashboard-reset">Reset</button></div>
-      ${data.optionsError ? `<div class="error">${escapeHtml(data.optionsError)}</div>` : ''}
-    </form>
     ${data.error ? `<div class="error">${escapeHtml(data.error)}</div>` : ''}
-    <div class="panel dashboard-subpanel">
-      <h3>Seller Analytics</h3>
-      <div class="metrics dashboard-metrics">
-        ${metric('Total Sellers', sellerSummary.total_sellers || 0)}
-        ${metric('New Sellers', sellerSummary.new_sellers || 0)}
-        ${metric('Active Sellers', sellerSummary.active_sellers || 0)}
-        ${metric('Total Listings', sellerSummary.total_listings || 0)}
+    <div class="dashboard-kpi-grid">${kpis.map((item) => `<article class="dashboard-kpi-card" style="border-top-color:${item.accent}"><div class="dashboard-kpi-label">${escapeHtml(item.label)}</div><div class="dashboard-kpi-value" style="color:${item.valueColor || item.accent}">${escapeHtml(item.value)}</div><div class="dashboard-kpi-detail">${item.detail}</div></article>`).join('')}</div>
+
+    <section class="dashboard-panel dashboard-panel--alert">
+      <div class="dashboard-panel-heading"><div class="dashboard-panel-title-wrap"><span class="dashboard-alert-dot" aria-hidden="true"></span><span class="dashboard-panel-title">Cảnh báo bất thường</span></div><span class="dashboard-panel-meta">${formatRecordCount((analysis.alerts || []).length)} cảnh báo</span></div>
+      <div class="dashboard-panel-subtext">So kỳ gần nhất với kỳ liền trước · theo từng ${escapeHtml(groupLabel)}</div>
+      ${renderDashboardAlerts(analysis.alerts || [])}
+    </section>
+
+    <div class="dashboard-chart-grid">
+      <article class="dashboard-panel dashboard-chart-panel"><div class="dashboard-chart-heading">Giá trung bình theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-legend">${buildDashboardLegendMarkup(groups)}</div><div class="dashboard-chart-wrap"><canvas id="dashboard-price-chart" role="img" aria-label="Biểu đồ đường giá trung bình theo ${escapeHtml(periodLabel)} cho các ${escapeHtml(groupLabel)}">Giá trung bình theo ${escapeHtml(periodLabel)}.</canvas></div></article>
+      <article class="dashboard-panel dashboard-chart-panel"><div class="dashboard-chart-heading">Số người bán theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-legend">${buildDashboardLegendMarkup(groups)}</div><div class="dashboard-chart-wrap"><canvas id="dashboard-seller-chart" role="img" aria-label="Biểu đồ đường số người bán theo ${escapeHtml(periodLabel)} cho các ${escapeHtml(groupLabel)}">Số người bán theo ${escapeHtml(periodLabel)}.</canvas></div></article>
+    </div>
+
+    <section class="dashboard-panel dashboard-panel--analysis">
+      <div class="dashboard-panel-title">Phân tích theo ${escapeHtml(groupLabel)} &amp; thời điểm</div>
+      <div class="dashboard-panel-subtext">Chọn ${escapeHtml(groupLabel)} và kỳ để xem dải giá, xu hướng, gợi ý niêm yết và người bán.</div>
+      <div class="dashboard-analysis-controls">
+        <label class="dashboard-form-field"><span>${escapeHtml(groupLabel)}</span><select id="dashboard-model-select">${groups.map((group) => `<option value="${escapeHtml(group)}" ${group === selectedModel ? 'selected' : ''}>${escapeHtml(group)}</option>`).join('')}</select></label>
+        <label class="dashboard-form-field dashboard-form-field--period"><span>Kỳ (${escapeHtml(periodLabel)})</span><select id="dashboard-period-select">${periods.map((period) => `<option value="${escapeHtml(period)}" ${period === selectedPeriod ? 'selected' : ''}>${escapeHtml(period)}</option>`).join('')}</select></label>
       </div>
-      ${buildSimpleLineChart({
-        title: 'Seller Trend',
-        points: data.sellerTrend?.points || [],
-        lines: [
-          { key: 'total_sellers', label: 'Total Sellers', color: '#7C3AED' },
-          { key: 'new_sellers', label: 'New Sellers', color: '#0EA5E9' },
-        ],
-      })}
-    </div>
-    <div class="panel dashboard-subpanel">
-      <h3>Price Analytics</h3>
-      <div class="metrics dashboard-metrics">
-        ${metric('Average Price', priceSummary.avg_price || 0)}
-        ${metric('Lowest Price', priceSummary.min_price || 0)}
-        ${metric('Highest Price', priceSummary.max_price || 0)}
-        ${metric('Price Sample', priceSummary.price_sample || priceSummary.sample_size || 0)}
-        ${metric('Currency', priceSummary.currency || 'unknown')}
-      </div>
-      ${buildSimpleLineChart({
-        title: 'Price Trend',
-        points: data.priceTrend?.points || [],
-        lines: [
-          { key: 'avg_price', label: 'Average Price', color: '#2563EB' },
-          { key: 'min_price', label: 'Lowest Price', color: '#0F766E' },
-          { key: 'max_price', label: 'Highest Price', color: '#D97706' },
-        ],
-      })}
-    </div>
-    <div class="panel dashboard-subpanel">
-      <h3>Price Comparison (${escapeHtml(data.priceComparison?.compare_by || 'brand')})</h3>
-      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Sample</th><th>Average Price</th><th>Lowest Price</th><th>Highest Price</th></tr></thead><tbody>${comparisonItems.map((item) => `<tr><td>${escapeHtml(item.name || item.keyword || '-')}</td><td>${formatRecordCount(item.sample_size || item.count || 0)}</td><td>${formatRecordCount(item.avg_price || 0)}</td><td>${formatRecordCount(item.min_price || 0)}</td><td>${formatRecordCount(item.max_price || 0)}</td></tr>`).join('')}</tbody></table></div>
-    </div>
-    <div class="panel dashboard-subpanel">
-      <h3>Market Alerts</h3>
-      ${alertItems.length
-        ? `<ul class="dashboard-alerts">${alertItems.map((alert) => renderAlert(alert)).join('')}</ul>`
-        : '<div class="empty-state">No significant market changes detected.</div>'}
-    </div>`;
+      ${current ? `
+        <div class="dashboard-product-meta"><b style="color:${selectedColor}">${escapeHtml(selectedModel)}</b> · ${escapeHtml(selectedPeriod)} · ${formatRecordCount(current.listing_count || 0)} listing · CV ${Number(current.cv || 0).toFixed(0)}%</div>
+        <div class="dashboard-mini-grid">
+          <div class="dashboard-mini-stat"><span>Người bán</span><strong>${formatRecordCount(current.seller_count || 0)}</strong><small>${renderDashboardDelta(current.seller_count, previous?.seller_count, 'number')}</small></div>
+          <div class="dashboard-mini-stat"><span>Thấp nhất</span><strong>${formatDashboardCurrency(current.min_price, currency)}</strong><small>${renderDashboardDelta(current.min_price, previous?.min_price, 'currency', currency)}</small></div>
+          <div class="dashboard-mini-stat"><span>Trung vị</span><strong>${formatDashboardCurrency(current.median_price, currency)}</strong><small>${renderDashboardDelta(current.median_price, previous?.median_price, 'currency', currency)}</small></div>
+          <div class="dashboard-mini-stat"><span>Giá TB</span><strong>${formatDashboardCurrency(current.avg_price, currency)}</strong><small>${renderDashboardDelta(current.avg_price, previous?.avg_price, 'currency', currency)}</small></div>
+          <div class="dashboard-mini-stat"><span>Cao nhất</span><strong>${formatDashboardCurrency(current.max_price, currency)}</strong><small>${renderDashboardDelta(current.max_price, previous?.max_price, 'currency', currency)}</small></div>
+          <div class="dashboard-mini-stat"><span>% hết hàng</span><strong>${Number(current.out_of_stock_pct || 0).toFixed(0)}%</strong><small>${renderDashboardDelta(current.out_of_stock_pct, previous?.out_of_stock_pct, 'points', currency, true)}</small></div>
+        </div>
+        <div class="dashboard-range-panel"><div class="dashboard-section-label">Dải giá trên thị trường</div><div class="dashboard-range-caption">Vùng tô đậm = 50% listing ở giữa (P25–P75); vạch = trung vị; chấm = giá TB.</div>${renderDashboardRangeSvg(current, selectedColor, currency)}</div>
+        <div class="dashboard-spark-grid">
+          <div class="dashboard-spark-panel"><div class="dashboard-section-label">Xu hướng giá TB 6 kỳ</div>${renderDashboardSparkline(selectedGroupRows, selectedPeriod, selectedColor)}<div class="dashboard-trend-text">${priceChange === null ? 'Chưa có kỳ trước để so sánh.' : `So kỳ trước: giá TB ${priceChange > 1 ? 'tăng' : (priceChange < -1 ? 'giảm' : 'đi ngang')} ${Math.abs(priceChange).toFixed(1)}%; người bán ${previous ? `${Number(current.seller_count || 0) - Number(previous.seller_count || 0) >= 0 ? '+' : ''}${Number(current.seller_count || 0) - Number(previous.seller_count || 0)}` : '—'}; CV ${Number(current.cv || 0).toFixed(0)}%.`}</div></div>
+          <div class="dashboard-spark-panel"><div class="dashboard-section-label">Gợi ý giá niêm yết</div>${recommendation ? `<div class="dashboard-suggestion-list">${recommendation.items.map((item) => `<div class="dashboard-suggestion ${item.label === recommendation.recommended ? 'dashboard-suggestion--active' : ''}"><span class="dashboard-suggestion-dot" style="background:${item.color}"></span><span class="dashboard-suggestion-copy"><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.note)}</small></span><strong>${formatDashboardCurrency(item.value, currency)}</strong></div>`).join('')}</div>` : '<div class="empty-state">Không đủ dữ liệu giá để tạo gợi ý.</div>'}</div>
+        </div>
+        ${recommendation ? `<div class="dashboard-note">${escapeHtml(recommendation.reason)}</div>` : ''}
+        <div class="dashboard-top-sellers-panel"><div class="dashboard-section-label">Top 10 người bán</div>${renderDashboardTopSellers(current.top_sellers || [], selectedColor, currency, current.seller_count)}</div>
+      ` : `<div class="empty-state">${escapeHtml(groupLabel)} không có dữ liệu trong kỳ đã chọn.</div>`}
+    </section>
+  `;
+
+  const groupBySelect = document.getElementById('dashboard-group-by');
+  if (groupBySelect) {
+    groupBySelect.addEventListener('change', async () => {
+      state.hqa.dashboard.groupBy = groupBySelect.value || 'model';
+      state.hqa.dashboard.selectedModel = '';
+      state.hqa.dashboard.selectedPeriod = '';
+      await loadHqaDashboardData();
+      renderHqaDashboard();
+    });
+  }
+  const granularitySelect = document.getElementById('dashboard-granularity');
+  if (granularitySelect) {
+    granularitySelect.addEventListener('change', async () => {
+      state.hqa.dashboard.granularity = granularitySelect.value || 'month';
+      state.hqa.dashboard.selectedPeriod = '';
+      await loadHqaDashboardData();
+      renderHqaDashboard();
+    });
+  }
+
+  const modelSelect = document.getElementById('dashboard-model-select');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', () => {
+      state.hqa.dashboard.selectedModel = modelSelect.value;
+      const availablePeriods = (analysis.group_periods || []).filter((item) => item.group === modelSelect.value).map((item) => item.period);
+      if (!availablePeriods.includes(state.hqa.dashboard.selectedPeriod)) {
+        state.hqa.dashboard.selectedPeriod = availablePeriods[availablePeriods.length - 1] || analysis.latest_period?.period || '';
+      }
+      renderHqaDashboard();
+    });
+  }
+  const periodSelect = document.getElementById('dashboard-period-select');
+  if (periodSelect) {
+    periodSelect.addEventListener('change', () => {
+      state.hqa.dashboard.selectedPeriod = periodSelect.value;
+      renderHqaDashboard();
+    });
+  }
+  dashboardView.querySelectorAll('[data-dashboard-export]').forEach((button) => {
+    button.addEventListener('click', () => downloadDashboardCsv(button.dataset.dashboardExport || 'group_period'));
+  });
+
+  renderDashboardCharts(analysis);
 }
 
 function dataCheckGroupKey(item) {
@@ -1100,6 +1404,7 @@ function renderDataCheckModal() {
   document.addEventListener('keydown', keydownHandler);
 
   updateControls();
+  input.focus();
   requestAnimationFrame(() => {
     input.focus();
   });
@@ -1160,6 +1465,7 @@ async function executeDataCheckCleanup() {
     state.hqa.dataCheck.cleanupResult = response;
     state.hqa.dataCheck.showConfirmModal = false;
     state.hqa.dataCheck.confirmationInput = '';
+    renderDataCheckModal();
     await loadDataCheckSummaryAndGroups(1);
     await loadAllListingsSummary();
     renderHqaSummary();
@@ -2305,9 +2611,8 @@ async function renderHqa(content, options = {}) {
   renderAllListingsToast();
 
   if (state.hqa.mainTab === 'dashboard') {
-    if (reloadData || !state.hqa.dashboard.summary) {
-      await loadHqaDashboardSellerStats();
-      await loadHqaDashboardFilterOptions();
+    syncDashboardFiltersFromAllListings();
+    if (reloadData || !state.hqa.dashboard.analysis) {
       await loadHqaDashboardData();
     }
     renderHqaDashboard();
@@ -2345,7 +2650,7 @@ async function renderHqa(content, options = {}) {
     refreshDataButton.dataset.bound = 'true';
     refreshDataButton.addEventListener('click', async () => {
       if (state.hqa.mainTab === 'dashboard') {
-        await loadHqaDashboardSellerStats();
+        syncDashboardFiltersFromAllListings();
         await loadHqaDashboardData();
         renderHqaDashboard();
         return;
@@ -2441,194 +2746,6 @@ async function renderHqa(content, options = {}) {
     retryReport.dataset.bound = 'true';
     retryReport.addEventListener('click', async () => {
       await loadActiveListings();
-    });
-  }
-
-  const dashboardForm = document.getElementById('dashboard-filters');
-  if (dashboardForm && !dashboardForm.dataset.bound) {
-    dashboardForm.dataset.bound = 'true';
-
-    const snapshotDashboardFilters = () => ({
-      keyword: document.getElementById('dashboard-keyword')?.value.trim() || '',
-      marketplace: document.getElementById('dashboard-marketplace')?.value.trim() || '',
-      brand: document.getElementById('dashboard-brand')?.value.trim() || '',
-      model: document.getElementById('dashboard-model')?.value.trim() || '',
-      currency: document.getElementById('dashboard-currency')?.value.trim() || '',
-      dateFrom: document.getElementById('dashboard-date-from')?.value || '',
-      dateTo: document.getElementById('dashboard-date-to')?.value || '',
-      groupBy: document.getElementById('dashboard-group-by')?.value || 'month',
-      minPrice: document.getElementById('dashboard-min-price')?.value.trim() || '',
-      maxPrice: document.getElementById('dashboard-max-price')?.value.trim() || '',
-    });
-
-    dashboardForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const nextFilters = snapshotDashboardFilters();
-      if (nextFilters.dateFrom && nextFilters.dateTo && nextFilters.dateFrom > nextFilters.dateTo) {
-        state.hqa.dashboard.error = 'Dashboard filter date range is invalid.';
-        renderHqaDashboard();
-        return;
-      }
-      const parsedMinPrice = parseNonNegativeNumber(nextFilters.minPrice);
-      if (!parsedMinPrice.ok) {
-        state.hqa.dashboard.error = parsedMinPrice.message;
-        renderHqaDashboard();
-        return;
-      }
-      const parsedMaxPrice = parseNonNegativeNumber(nextFilters.maxPrice);
-      if (!parsedMaxPrice.ok) {
-        state.hqa.dashboard.error = parsedMaxPrice.message;
-        renderHqaDashboard();
-        return;
-      }
-      nextFilters.minPrice = parsedMinPrice.value;
-      nextFilters.maxPrice = parsedMaxPrice.value;
-      if (nextFilters.minPrice !== '' && nextFilters.maxPrice !== '' && Number(nextFilters.minPrice) > Number(nextFilters.maxPrice)) {
-        state.hqa.dashboard.error = 'Min price must be less than or equal to max price.';
-        renderHqaDashboard();
-        return;
-      }
-
-      state.hqa.dashboard.error = '';
-      state.hqa.dashboard.draftFilters = nextFilters;
-      state.hqa.dashboard.appliedFilters = nextFilters;
-      await loadHqaDashboardFilterOptions();
-      await loadHqaDashboardData();
-      renderHqaDashboard();
-      await renderHqa(content, { reloadData: false });
-    });
-
-    const brandSelect = document.getElementById('dashboard-brand');
-    if (brandSelect && !brandSelect.dataset.bound) {
-      brandSelect.dataset.bound = 'true';
-      brandSelect.addEventListener('change', async () => {
-        const draftFilters = {
-          ...state.hqa.dashboard.draftFilters,
-          brand: brandSelect.value.trim(),
-          model: '',
-        };
-        state.hqa.dashboard.draftFilters = draftFilters;
-        await loadHqaDashboardFilterOptions();
-        renderHqaDashboard();
-        await renderHqa(content, { reloadData: false });
-      });
-    }
-
-    dashboardForm.addEventListener('click', async (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
-      if (target.id !== 'dashboard-reset') return;
-      const emptyFilters = {
-        keyword: '',
-        marketplace: '',
-        brand: '',
-        model: '',
-        currency: '',
-        dateFrom: '',
-        dateTo: '',
-        groupBy: 'month',
-        minPrice: '',
-        maxPrice: '',
-      };
-      state.hqa.dashboard.error = '';
-      state.hqa.dashboard.draftFilters = emptyFilters;
-      state.hqa.dashboard.appliedFilters = emptyFilters;
-      await loadHqaDashboardFilterOptions();
-      await loadHqaDashboardData();
-      renderHqaDashboard();
-      await renderHqa(content, { reloadData: false });
-    });
-  }
-
-  const sellerStatsForm = document.getElementById('dashboard-seller-stats-filters');
-  if (sellerStatsForm && !sellerStatsForm.dataset.bound) {
-    sellerStatsForm.dataset.bound = 'true';
-    sellerStatsForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const dateFrom = document.getElementById('dashboard-seller-stats-date-from')?.value || '';
-      const dateTo = document.getElementById('dashboard-seller-stats-date-to')?.value || '';
-      if (dateFrom && dateTo && dateFrom > dateTo) {
-        state.hqa.dashboard.sellerStatsError = 'Date range is invalid.';
-        renderHqaDashboard();
-        await renderHqa(content, { reloadData: false });
-        return;
-      }
-      state.hqa.dashboard.sellerStatsError = '';
-      state.hqa.dashboard.sellerStats = {
-        ...state.hqa.dashboard.sellerStats,
-        dateFrom,
-        dateTo,
-      };
-      await loadHqaDashboardSellerStats();
-      renderHqaDashboard();
-      await renderHqa(content, { reloadData: false });
-    });
-
-    sellerStatsForm.addEventListener('click', async (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
-      if (target.id !== 'dashboard-seller-stats-reset') return;
-      state.hqa.dashboard.sellerStatsError = '';
-      state.hqa.dashboard.sellerStats = {
-        ...state.hqa.dashboard.sellerStats,
-        dateFrom: '',
-        dateTo: '',
-      };
-      await loadHqaDashboardSellerStats();
-      renderHqaDashboard();
-      await renderHqa(content, { reloadData: false });
-    });
-  }
-
-  const dashboardExportButton = document.getElementById('dashboard-export');
-  if (dashboardExportButton && !dashboardExportButton.dataset.bound) {
-    dashboardExportButton.dataset.bound = 'true';
-    dashboardExportButton.addEventListener('click', async () => {
-      state.hqa.dashboard.isExporting = true;
-      renderHqaDashboard();
-      try {
-        const dataset = document.getElementById('dashboard-export-dataset')?.value || 'summary';
-        const params = buildDashboardAppliedParams();
-        params.set('dataset', dataset);
-        if (state.hqa.dashboard.appliedFilters.groupBy) {
-          params.set('granularity', state.hqa.dashboard.appliedFilters.groupBy);
-        }
-        await downloadCsv(`/hqa/dashboard/export?${params.toString()}`, `hqa_dashboard_${dataset}.csv`);
-      } catch (error) {
-        state.hqa.dashboard.error = error.message || 'Dashboard export failed.';
-      } finally {
-        state.hqa.dashboard.isExporting = false;
-        renderHqaDashboard();
-      }
-    });
-  }
-
-  const dashboardDrilldownButton = document.getElementById('dashboard-drilldown');
-  if (dashboardDrilldownButton && !dashboardDrilldownButton.dataset.bound) {
-    dashboardDrilldownButton.dataset.bound = 'true';
-    dashboardDrilldownButton.addEventListener('click', async () => {
-      const filters = state.hqa.dashboard.appliedFilters;
-      const mapped = {
-        fromDate: filters.dateFrom || '',
-        toDate: filters.dateTo || '',
-        marketplace: filters.marketplace || '',
-        brand: filters.brand || '',
-        model: filters.model || '',
-        conditions: [],
-        statuses: [],
-        categoryNames: [],
-        buyingOptions: [],
-        sortCollected: 'newest',
-        minPrice: filters.minPrice || '',
-        maxPrice: filters.maxPrice || '',
-        search: filters.keyword || '',
-      };
-      state.hqa.allListings.openLazyField = '';
-      state.hqa.allListings.draftFilters = cloneAllListingsFilters(mapped);
-      state.hqa.allListings.appliedFilters = cloneAllListingsFilters(mapped);
-      setHqaMainTab('all_listings');
-      state.hqa.page = 1;
-      await renderHqa(content, { reloadData: true });
     });
   }
 

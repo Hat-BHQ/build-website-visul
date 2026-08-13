@@ -21,6 +21,7 @@ from app.service import (
     fetch_duplicate_listing_summary,
     fetch_dashboard_counts,
     fetch_hqa_dashboard_alerts,
+    fetch_hqa_dashboard_analysis,
     fetch_hqa_dashboard_summary,
     fetch_hqa_dashboard_export_rows,
     fetch_hqa_dashboard_filter_options,
@@ -431,6 +432,60 @@ def hqa_duplicate_listing_cleanup(
         return cleanup_duplicate_listings(db)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/internal/v1/hqa/dashboard/analysis")
+def hqa_dashboard_analysis(
+    request: Request,
+    keyword: str | None = None,
+    currency: str | None = None,
+    group_by: str = Query(default="model"),
+    granularity: str = Query(default="month"),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    max_price: float | None = Query(default=None, ge=0),
+    price_drop_warning_pct: float = Query(default=20.0, ge=0),
+    price_drop_critical_pct: float = Query(default=30.0, ge=0),
+    out_of_stock_warning_points: float = Query(default=30.0, ge=0),
+    out_of_stock_critical_points: float = Query(default=50.0, ge=0),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    filters = _collect_hqa_dashboard_filters(
+        request,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=min_price,
+        max_price=max_price,
+        currency=currency,
+    )
+    try:
+        return fetch_hqa_dashboard_analysis(
+            db,
+            keyword=filters["keyword"],
+            marketplaces=filters["marketplaces"],
+            brands=filters["brands"],
+            models=filters["models"],
+            conditions=_get_query_list(request, "condition", "conditions"),
+            statuses=filters["statuses"],
+            category_names=filters["category_names"],
+            buying_options=filters["buying_options"],
+            currency=filters["currency"],
+            date_from=filters["date_from"],
+            date_to=filters["date_to"],
+            min_price=filters["min_price"],
+            max_price=filters["max_price"],
+            group_by=group_by,
+            granularity=granularity,
+            price_drop_warning_pct=price_drop_warning_pct,
+            price_drop_critical_pct=price_drop_critical_pct,
+            out_of_stock_warning_points=out_of_stock_warning_points,
+            out_of_stock_critical_points=out_of_stock_critical_points,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/internal/v1/hqa/dashboard/filter-options")

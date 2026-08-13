@@ -154,6 +154,11 @@ async def hqa_data_check_duplicates_cleanup(request: Request):
     )
 
 
+@app.get("/api/v1/hqa/dashboard/analysis")
+async def hqa_dashboard_analysis(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/analysis", request)
+
+
 @app.get("/api/v1/hqa/dashboard/filter-options")
 async def hqa_dashboard_filter_options(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/dashboard/filter-options", request)

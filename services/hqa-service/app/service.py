@@ -2436,6 +2436,19 @@ def _median(values: list[float]) -> float:
     return float((ordered[mid - 1] + ordered[mid]) / 2)
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    position = quantile * (len(ordered) - 1)
+    lower_index = int(position)
+    fraction = position - lower_index
+    upper_index = min(lower_index + 1, len(ordered) - 1)
+    return float(ordered[lower_index] + (ordered[upper_index] - ordered[lower_index]) * fraction)
+
+
 def _normalized_text_in_values_filter(statement, column_expr, values: list[str] | None):
     normalized_values = _normalize_filter_values(values)
     if not normalized_values:
@@ -2594,6 +2607,369 @@ def _collect_dashboard_option_values(db: Session, statement, column_name: str) -
         .limit(FILTER_OPTIONS_LIMIT)
     ).all()
     return [row[0] for row in rows if row[0]]
+
+
+def fetch_hqa_dashboard_analysis(
+    db: Session,
+    *,
+    keyword: str | None,
+    marketplaces: list[str] | None,
+    brands: list[str] | None,
+    models: list[str] | None,
+    conditions: list[str] | None,
+    statuses: list[str] | None,
+    category_names: list[str] | None,
+    buying_options: list[str] | None,
+    currency: str | None,
+    date_from: date | None,
+    date_to: date | None,
+    min_price: Decimal | float | None,
+    max_price: Decimal | float | None,
+    group_by: str = "model",
+    granularity: str = "month",
+    price_drop_warning_pct: float = 20.0,
+    price_drop_critical_pct: float = 30.0,
+    out_of_stock_warning_points: float = 30.0,
+    out_of_stock_critical_points: float = 50.0,
+):
+    """Build the dashboard payload from real marketplace_research_results rows.
+
+    The endpoint intentionally returns group x period statistics in one response so the
+    vanilla-JS dashboard can render KPI cards, alerts, multi-series charts and drill-downs
+    without issuing one request per model/period.
+    """
+    normalized_group = (group_by or "model").strip().lower()
+    if normalized_group not in {"model", "brand", "category"}:
+        raise ValueError("group_by must be one of: model, brand, category")
+    normalized_granularity = _parse_dashboard_granularity(granularity)
+    if normalized_granularity not in {"month", "week"}:
+        raise ValueError("granularity must be one of: month, week")
+
+    statement = _build_dashboard_rows_statement(
+        keyword=keyword,
+        marketplaces=marketplaces,
+        brands=brands,
+        models=models,
+        statuses=statuses,
+        category_names=category_names,
+        buying_options=buying_options,
+        sellers=None,
+        currency=currency,
+        date_from=date_from,
+        date_to=date_to,
+        min_price=min_price,
+        max_price=max_price,
+    )
+    statement = _normalized_text_in_values_filter(statement, listing_table.c["condition"], conditions)
+
+    rows = db.execute(
+        statement.with_only_columns(
+            listing_table.c.listing_id,
+            listing_table.c.model,
+            listing_table.c.brand,
+            listing_table.c.category_name,
+            listing_table.c.seller_or_shop,
+            listing_table.c.price,
+            listing_table.c.currency,
+            listing_table.c.listing_status,
+            listing_table.c.research_date,
+        ).order_by(listing_table.c.research_date.asc(), listing_table.c.id.asc())
+    ).mappings().all()
+
+    def period_key(value: date) -> str:
+        if normalized_granularity == "week":
+            iso_year, iso_week, _ = value.isocalendar()
+            return f"{iso_year}-W{iso_week:02d}"
+        return value.strftime("%Y-%m")
+
+    group_field = {
+        "model": "model",
+        "brand": "brand",
+        "category": "category_name",
+    }[normalized_group]
+
+    def empty_bucket() -> dict:
+        return {
+            "listing_count": 0,
+            "unique_ids": set(),
+            "sellers": set(),
+            "prices": [],
+            "out_of_stock_count": 0,
+            "currencies": set(),
+            "seller_rows": defaultdict(lambda: {"listing_count": 0, "prices": []}),
+        }
+
+    grouped: dict[tuple[str, str], dict] = defaultdict(empty_bucket)
+    global_periods: dict[str, dict] = defaultdict(empty_bucket)
+    groups_seen: set[str] = set()
+    models_by_period: dict[str, set[str]] = defaultdict(set)
+
+    for row in rows:
+        research_date = row.get("research_date")
+        if not research_date:
+            continue
+        period = period_key(research_date)
+        global_bucket = global_periods[period]
+        global_bucket["listing_count"] += 1
+
+        listing_id = (row.get("listing_id") or "").strip()
+        if listing_id:
+            global_bucket["unique_ids"].add(listing_id)
+
+        model_value = (row.get("model") or "").strip()
+        if model_value:
+            models_by_period[period].add(model_value)
+
+        seller = (row.get("seller_or_shop") or "").strip()
+        if seller:
+            global_bucket["sellers"].add(seller)
+
+        status = (row.get("listing_status") or "").strip().lower()
+        if status == "out_of_stock":
+            global_bucket["out_of_stock_count"] += 1
+
+        numeric_price = _safe_float(row.get("price"))
+        if numeric_price is not None:
+            global_bucket["prices"].append(numeric_price)
+
+        currency_value = (row.get("currency") or "").strip().upper()
+        if currency_value:
+            global_bucket["currencies"].add(currency_value)
+
+        group_name = (row.get(group_field) or "").strip()
+        if not group_name:
+            continue
+        groups_seen.add(group_name)
+        bucket = grouped[(group_name, period)]
+        bucket["listing_count"] += 1
+        if listing_id:
+            bucket["unique_ids"].add(listing_id)
+        if seller:
+            bucket["sellers"].add(seller)
+            seller_bucket = bucket["seller_rows"][seller]
+            seller_bucket["listing_count"] += 1
+            if numeric_price is not None:
+                seller_bucket["prices"].append(numeric_price)
+        if numeric_price is not None:
+            bucket["prices"].append(numeric_price)
+        if currency_value:
+            bucket["currencies"].add(currency_value)
+        if status == "out_of_stock":
+            bucket["out_of_stock_count"] += 1
+
+    periods = sorted(global_periods.keys())
+
+    def currency_label(values: set[str]) -> str:
+        if not values:
+            return (currency or "USD").strip().upper() or "USD"
+        if len(values) == 1:
+            return next(iter(values))
+        return "MIXED"
+
+    def finalize(bucket: dict) -> dict:
+        prices = [float(value) for value in bucket["prices"] if value is not None]
+        average = (sum(prices) / len(prices)) if prices else None
+        if prices and len(prices) > 1 and average is not None:
+            variance = sum((value - average) ** 2 for value in prices) / len(prices)
+            std = variance ** 0.5
+        else:
+            std = 0.0 if prices else None
+        listing_count = int(bucket["listing_count"])
+        out_of_stock_count = int(bucket["out_of_stock_count"])
+        top_sellers: list[dict] = []
+        for seller, seller_bucket in bucket["seller_rows"].items():
+            seller_prices = [float(value) for value in seller_bucket["prices"] if value is not None]
+            top_sellers.append(
+                {
+                    "seller": seller,
+                    "listing_count": int(seller_bucket["listing_count"]),
+                    "avg_price": round(sum(seller_prices) / len(seller_prices), 2) if seller_prices else None,
+                    "min_price": round(min(seller_prices), 2) if seller_prices else None,
+                }
+            )
+        top_sellers.sort(
+            key=lambda item: (
+                -item["listing_count"],
+                item["avg_price"] if item["avg_price"] is not None else float("inf"),
+                item["seller"].lower(),
+            )
+        )
+        return {
+            "listing_count": listing_count,
+            "unique_ids": len(bucket["unique_ids"]),
+            "seller_count": len(bucket["sellers"]),
+            "seller_names": sorted(bucket["sellers"], key=str.lower),
+            "price_sample": len(prices),
+            "min_price": round(min(prices), 2) if prices else None,
+            "max_price": round(max(prices), 2) if prices else None,
+            "avg_price": round(average, 2) if average is not None else None,
+            "median_price": round(_median(prices), 2) if prices else None,
+            "p25": round(_percentile(prices, 0.25), 2) if prices else None,
+            "p75": round(_percentile(prices, 0.75), 2) if prices else None,
+            "std": round(std, 2) if std is not None else None,
+            "cv": round((std / average) * 100, 2) if std is not None and average else None,
+            "out_of_stock_count": out_of_stock_count,
+            "out_of_stock_pct": round((out_of_stock_count / listing_count) * 100, 2) if listing_count else 0.0,
+            "currency": currency_label(bucket["currencies"]),
+            "top_sellers": top_sellers[:10],
+        }
+
+    group_period_rows: list[dict] = []
+    internal_stats: dict[tuple[str, str], dict] = {}
+    seller_history: dict[str, set[str]] = defaultdict(set)
+
+    for group_name in sorted(groups_seen, key=str.lower):
+        prior_sellers: set[str] = set()
+        for period in periods:
+            bucket = grouped.get((group_name, period))
+            if not bucket:
+                continue
+            stats = finalize(bucket)
+            current_sellers = set(stats.pop("seller_names"))
+            new_sellers = sorted(current_sellers - prior_sellers, key=str.lower)
+            stats["new_seller_count"] = len(new_sellers)
+            stats["new_sellers"] = new_sellers[:10]
+            stats["group"] = group_name
+            stats["period"] = period
+            internal_stats[(group_name, period)] = {**stats, "seller_names": current_sellers}
+            group_period_rows.append(stats)
+            prior_sellers.update(current_sellers)
+            seller_history[group_name].update(current_sellers)
+
+    latest_period = periods[-1] if periods else None
+    previous_period = periods[-2] if len(periods) >= 2 else None
+    latest_summary = None
+    if latest_period:
+        latest_summary = finalize(global_periods[latest_period])
+        latest_summary.pop("seller_names", None)
+        latest_summary["model_count"] = len(models_by_period.get(latest_period, set()))
+        latest_summary["period"] = latest_period
+
+    alerts: list[dict] = []
+    severity_rank = {"critical": 3, "warning": 2, "info": 1}
+    for group_name in sorted(groups_seen, key=str.lower):
+        current = internal_stats.get((group_name, latest_period)) if latest_period else None
+        previous = internal_stats.get((group_name, previous_period)) if previous_period else None
+        if not current:
+            continue
+
+        current_avg = current.get("avg_price")
+        previous_avg = previous.get("avg_price") if previous else None
+        if current_avg is not None and previous_avg not in {None, 0}:
+            drop_pct = ((previous_avg - current_avg) / previous_avg) * 100
+            if drop_pct >= price_drop_warning_pct:
+                severity = "critical" if drop_pct >= price_drop_critical_pct else "warning"
+                alerts.append(
+                    {
+                        "type": "price_drop",
+                        "severity": severity,
+                        "severity_rank": severity_rank[severity],
+                        "group": group_name,
+                        "period": latest_period,
+                        "currency": current.get("currency", "USD"),
+                        "title": "Giá giảm mạnh",
+                        "previous_avg_price": previous_avg,
+                        "current_avg_price": current_avg,
+                        "change_percent": round(-drop_pct, 2),
+                        "message": f"Giá TB giảm {drop_pct:.1f}% so với kỳ liền trước.",
+                    }
+                )
+
+        current_min = current.get("min_price")
+        historical_mins = [
+            internal_stats[(group_name, period)].get("min_price")
+            for period in periods
+            if period != latest_period and (group_name, period) in internal_stats
+        ]
+        historical_mins = [value for value in historical_mins if value is not None]
+        if current_min is not None and historical_mins and current_min < min(historical_mins):
+            alerts.append(
+                {
+                    "type": "new_low",
+                    "severity": "warning",
+                    "severity_rank": severity_rank["warning"],
+                    "group": group_name,
+                    "period": latest_period,
+                    "currency": current.get("currency", "USD"),
+                    "title": "Đáy giá mới",
+                    "current_min_price": current_min,
+                    "previous_floor_price": round(min(historical_mins), 2),
+                    "message": "Giá thấp nhất kỳ này thấp hơn mọi kỳ trước trong phạm vi dữ liệu.",
+                }
+            )
+
+        has_prior_group_period = any(
+            period != latest_period and (group_name, period) in internal_stats
+            for period in periods
+        )
+        if has_prior_group_period and current.get("new_seller_count", 0) > 0:
+            alerts.append(
+                {
+                    "type": "new_seller",
+                    "severity": "info",
+                    "severity_rank": severity_rank["info"],
+                    "group": group_name,
+                    "period": latest_period,
+                    "currency": current.get("currency", "USD"),
+                    "title": "Người bán mới",
+                    "new_seller_count": current.get("new_seller_count", 0),
+                    "new_sellers": current.get("new_sellers", []),
+                    "message": f"Có {current.get('new_seller_count', 0)} người bán mới xuất hiện trong kỳ này.",
+                }
+            )
+
+        if previous:
+            jump_points = float(current.get("out_of_stock_pct") or 0) - float(previous.get("out_of_stock_pct") or 0)
+            if jump_points >= out_of_stock_warning_points:
+                severity = "critical" if jump_points >= out_of_stock_critical_points else "warning"
+                alerts.append(
+                    {
+                        "type": "out_of_stock_spike",
+                        "severity": severity,
+                        "severity_rank": severity_rank[severity],
+                        "group": group_name,
+                        "period": latest_period,
+                        "currency": current.get("currency", "USD"),
+                        "title": "Hết hàng hàng loạt",
+                        "previous_out_of_stock_pct": previous.get("out_of_stock_pct", 0),
+                        "current_out_of_stock_pct": current.get("out_of_stock_pct", 0),
+                        "change_points": round(jump_points, 2),
+                        "message": f"Tỷ lệ hết hàng tăng {jump_points:.1f} điểm % so với kỳ liền trước.",
+                    }
+                )
+
+    alerts.sort(key=lambda item: (-int(item.get("severity_rank") or 0), item.get("group") or "", item.get("type") or ""))
+
+    latest_group_counts: dict[str, int] = {}
+    if latest_period:
+        for group_name in groups_seen:
+            stats = internal_stats.get((group_name, latest_period))
+            latest_group_counts[group_name] = int(stats.get("listing_count") or 0) if stats else 0
+    groups = sorted(groups_seen, key=lambda name: (-latest_group_counts.get(name, 0), name.lower()))
+
+    for item in group_period_rows:
+        item.pop("seller_names", None)
+
+    return {
+        "group_by": normalized_group,
+        "granularity": normalized_granularity,
+        "periods": periods,
+        "groups": groups,
+        "latest_period": latest_summary,
+        "previous_period": previous_period,
+        "group_periods": group_period_rows,
+        "alerts": alerts,
+        "meta": {
+            "source_table": "public.marketplace_research_results",
+            "time_field": "research_date",
+            "group_field": group_field,
+            "row_count": len(rows),
+            "price_drop_warning_pct": price_drop_warning_pct,
+            "price_drop_critical_pct": price_drop_critical_pct,
+            "out_of_stock_warning_points": out_of_stock_warning_points,
+            "out_of_stock_critical_points": out_of_stock_critical_points,
+        },
+    }
 
 
 def fetch_hqa_dashboard_filter_options(
@@ -3516,34 +3892,139 @@ def fetch_hqa_dashboard_price_comparison(
         max_price=max_price,
     )
     scope = statement.order_by(None).subquery("price_comparison_scope")
-    value_expr = func.trim(func.coalesce(scope.c.brand if mode == "brand" else scope.c.model, ""))
-    rows = db.execute(
+    group_column = scope.c.brand if mode == "brand" else scope.c.model
+    name_expr = func.trim(func.coalesce(group_column, ""))
+    detail_rows = db.execute(
         select(
-            value_expr.label("name"),
-            func.count().label("sample_size"),
-            func.avg(scope.c.price).label("avg_price"),
-            func.min(scope.c.price).label("min_price"),
-            func.max(scope.c.price).label("max_price"),
-        )
-        .where(value_expr != "")
-        .group_by(value_expr)
-        .order_by(func.avg(scope.c.price).desc(), value_expr.asc())
-        .limit(limit)
+            name_expr.label("name"),
+            scope.c.price.label("price"),
+            func.coalesce(scope.c.seller_or_shop, "").label("seller"),
+            func.coalesce(scope.c.listing_status, "").label("status"),
+        ).where(name_expr != "")
     ).mappings().all()
 
-    return {
-        "compare_by": mode,
-        "items": [
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for detail in detail_rows:
+        grouped[detail.get("name") or ""].append(detail)
+
+    previous_grouped: dict[str, list[dict]] = {}
+    if date_from and date_to and date_to >= date_from:
+        window_days = (date_to - date_from).days + 1
+        previous_to = date_from - timedelta(days=1)
+        previous_from = previous_to - timedelta(days=window_days - 1)
+        previous_statement = _build_price_scope_statement(
+            keyword=keyword,
+            marketplaces=marketplaces,
+            brands=brands,
+            models=models,
+            statuses=statuses,
+            category_names=category_names,
+            buying_options=buying_options,
+            sellers=sellers,
+            currency=currency,
+            date_from=previous_from,
+            date_to=previous_to,
+            min_price=min_price,
+            max_price=max_price,
+        )
+        previous_scope = previous_statement.order_by(None).subquery("price_comparison_previous_scope")
+        previous_group_column = previous_scope.c.brand if mode == "brand" else previous_scope.c.model
+        previous_name_expr = func.trim(func.coalesce(previous_group_column, ""))
+        previous_rows = db.execute(
+            select(
+                previous_name_expr.label("name"),
+                previous_scope.c.price.label("price"),
+                func.coalesce(previous_scope.c.seller_or_shop, "").label("seller"),
+                func.coalesce(previous_scope.c.listing_status, "").label("status"),
+            ).where(previous_name_expr != "")
+        ).mappings().all()
+        previous_grouped = defaultdict(list)
+        for detail in previous_rows:
+            previous_grouped[detail.get("name") or ""].append(detail)
+
+    def _group_price_stats(entries: list[dict]) -> dict:
+        prices = [float(entry["price"]) for entry in entries if entry.get("price") is not None]
+        seller_names = {
+            (entry.get("seller") or "").strip()
+            for entry in entries
+            if (entry.get("seller") or "").strip()
+        }
+        out_of_stock = sum(1 for entry in entries if (entry.get("status") or "") == "out_of_stock")
+        total_rows = len(entries)
+        average = sum(prices) / len(prices) if prices else 0.0
+        if len(prices) > 1:
+            variance = sum((value - average) ** 2 for value in prices) / len(prices)
+            deviation = variance ** 0.5
+        else:
+            deviation = 0.0
+        return {
+            "sample_size": len(prices),
+            "seller_count": len(seller_names),
+            "sellers": seller_names,
+            "avg_price": round(average, 2),
+            "min_price": round(min(prices), 2) if prices else 0.0,
+            "max_price": round(max(prices), 2) if prices else 0.0,
+            "median_price": round(_median(prices), 2),
+            "p25": round(_percentile(prices, 0.25), 2),
+            "p75": round(_percentile(prices, 0.75), 2),
+            "cv": round((deviation / average) * 100, 1) if average else 0.0,
+            "out_of_stock_pct": round((out_of_stock / total_rows) * 100, 1) if total_rows else 0.0,
+        }
+
+    def _group_top_sellers(entries: list[dict]) -> list[dict]:
+        per_seller: dict[str, list[float]] = defaultdict(list)
+        for entry in entries:
+            seller = (entry.get("seller") or "").strip()
+            if not seller or entry.get("price") is None:
+                continue
+            per_seller[seller].append(float(entry["price"]))
+        summaries = [
             {
-                "name": row.get("name") or "",
-                "sample_size": _safe_int(row.get("sample_size")),
-                "avg_price": round(_safe_float(row.get("avg_price")) or 0.0, 2),
-                "min_price": round(_safe_float(row.get("min_price")) or 0.0, 2),
-                "max_price": round(_safe_float(row.get("max_price")) or 0.0, 2),
+                "seller": seller,
+                "listing_count": len(values),
+                "avg_price": round(sum(values) / len(values), 2),
+                "min_price": round(min(values), 2),
             }
-            for row in rows
-        ],
-    }
+            for seller, values in per_seller.items()
+        ]
+        summaries.sort(key=lambda summary: (-summary["listing_count"], summary["avg_price"]))
+        return summaries[:10]
+
+    items: list[dict] = []
+    for name, entries in grouped.items():
+        stats = _group_price_stats(entries)
+        previous_entries = previous_grouped.get(name, [])
+        previous_stats = _group_price_stats(previous_entries) if previous_entries else None
+        new_sellers = sorted(stats["sellers"] - (previous_stats["sellers"] if previous_stats else set()))
+        item = {
+            "name": name,
+            "sample_size": stats["sample_size"],
+            "seller_count": stats["seller_count"],
+            "avg_price": stats["avg_price"],
+            "min_price": stats["min_price"],
+            "max_price": stats["max_price"],
+            "median_price": stats["median_price"],
+            "p25": stats["p25"],
+            "p75": stats["p75"],
+            "cv": stats["cv"],
+            "out_of_stock_pct": stats["out_of_stock_pct"],
+            "top_sellers": _group_top_sellers(entries),
+            "new_seller_count": len(new_sellers),
+            "new_sellers": new_sellers[:10],
+        }
+        if previous_stats is not None:
+            item["previous_avg_price"] = previous_stats["avg_price"]
+            item["previous_min_price"] = previous_stats["min_price"]
+            item["previous_max_price"] = previous_stats["max_price"]
+            item["previous_median_price"] = previous_stats["median_price"]
+            item["previous_seller_count"] = previous_stats["seller_count"]
+            item["previous_out_of_stock_pct"] = previous_stats["out_of_stock_pct"]
+        items.append(item)
+
+    items.sort(key=lambda entry: (-entry["avg_price"], entry["name"]))
+    items = items[:limit]
+
+    return {"compare_by": mode, "items": items}
 
 
 def fetch_hqa_dashboard_export_rows(
