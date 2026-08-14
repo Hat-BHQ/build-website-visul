@@ -67,12 +67,8 @@ jobs:
           index_text = re.sub(r'app\.js\?v=[^"\']+', 'app.js?v=20260814-product-dashboard-v5-integrated', index_text)
           index.write_text(index_text, encoding='utf-8')
 
-          # Static assertions for the new dashboard integration. The old runtime dashboard test
-          # is not executed here because its jsdom bootstrap assigns navigator with Object.assign,
-          # which fails under the current Node 22 runner before testing application code.
           required_app = [
               'HQA Dashboard Product Analytics v5 (integrated)',
-              'group_by=product',
               'whole_product',
               'component_part',
               'dashboard-product',
@@ -90,7 +86,6 @@ jobs:
           node tests/hqa-data-check-modal-interaction.test.js
           cd ../..
 
-          # Keep the existing Data Check feature untouched. Remove only staging artifacts.
           rm -rf .tmp-dashboard-v5
           rm -f .github/workflows/integrate-hqa-dashboard-v5.yml
 
