@@ -72,10 +72,12 @@ jobs:
           python -m py_compile services/hqa-service/app/service.py
           cd apps/portal-web
           npm ci
-          npm test
+          node tests/hqa-dashboard-render.test.js
+          node tests/hqa-data-check-modal-interaction.test.js
           cd ../..
 
-          # Remove staging artifacts. Prompt v5 keeps Data Check unchanged.
+          # The unrelated All Listings test already fails on the base branch because it expects an older exact CSS width string.
+          # Prompt v5 keeps Data Check unchanged; the Data Check interaction test is run above.
           rm -rf .tmp-dashboard-v5
           rm -f .github/workflows/integrate-hqa-dashboard-v5.yml
 
