@@ -1,0 +1,78 @@
+name: Integrate HQA dashboard v5
+on:
+  push:
+    branches:
+      - talia/dashboard-product-analytics-v5-integrated
+permissions:
+  contents: write
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: talia/dashboard-product-analytics-v5-integrated
+          fetch-depth: 0
+      - name: Integrate product-first dashboard into existing files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, zlib, re
+
+          root = Path.cwd()
+          tmp = root / '.tmp-dashboard-v5'
+          app = root / 'apps/portal-web/assets/app.js'
+          css = root / 'apps/portal-web/assets/styles.css'
+          service = root / 'services/hqa-service/app/service.py'
+          test = root / 'apps/portal-web/tests/hqa-dashboard-render.test.js'
+          index = root / 'apps/portal-web/index.html'
+
+          def unpack(name):
+              return zlib.decompress(base64.b64decode((tmp / name).read_text().strip())).decode('utf-8')
+
+          app_text = app.read_text(encoding='utf-8')
+          marker = '// --- HQA Dashboard Product Analytics v5 (integrated) ---'
+          if marker not in app_text:
+              addon = unpack('frontend.zb64').rstrip()
+              needle = '\nbootstrap();'
+              if needle not in app_text:
+                  raise RuntimeError('bootstrap() marker not found in app.js')
+              app_text = app_text.replace(needle, f'\n\n{marker}\n{addon}\n// --- end HQA Dashboard Product Analytics v5 ---\n\nbootstrap();', 1)
+              app.write_text(app_text, encoding='utf-8')
+
+          css_text = css.read_text(encoding='utf-8')
+          css_marker = '/* --- HQA Dashboard Product Analytics v5 (integrated) --- */'
+          if css_marker not in css_text:
+              css.write_text(css_text.rstrip() + '\n\n' + css_marker + '\n' + unpack('styles.zb64').strip() + '\n', encoding='utf-8')
+
+          service_text = service.read_text(encoding='utf-8')
+          service_marker = '# --- HQA Dashboard Product Analytics v5 (integrated) ---'
+          if service_marker not in service_text:
+              service.write_text(service_text.rstrip() + '\n\n' + service_marker + '\n' + unpack('backend.zb64').strip() + '\n# --- end HQA Dashboard Product Analytics v5 ---\n', encoding='utf-8')
+
+          test.write_text(unpack('dashboard-test.zb64'), encoding='utf-8')
+
+          index_text = index.read_text(encoding='utf-8')
+          index_text = re.sub(r'styles\\.css\\?v=[^"\']+', 'styles.css?v=20260814-product-dashboard-v5-integrated', index_text)
+          index_text = re.sub(r'app\\.js\\?v=[^"\']+', 'app.js?v=20260814-product-dashboard-v5-integrated', index_text)
+          index.write_text(index_text, encoding='utf-8')
+          PY
+
+          # Prompt v5 requires Data Check to remain untouched. Only dashboard files are integrated.
+          node --check apps/portal-web/assets/app.js
+          python -m py_compile services/hqa-service/app/service.py
+          cd apps/portal-web
+          npm ci
+          npm test
+          cd ../..
+
+          rm -rf .tmp-dashboard-v5
+          rm -f .github/workflows/integrate-hqa-dashboard-v5.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(hqa): integrate product-first dashboard v5"
+          git push origin HEAD:talia/dashboard-product-analytics-v5-integrated
