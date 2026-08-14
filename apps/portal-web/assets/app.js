@@ -2927,4 +2927,185 @@ if (typeof window !== 'undefined') {
   window.__hqaState = state;
 }
 
+
+// --- HQA Dashboard Product Analytics v5 (integrated) ---
+// HQA Product-first Marketing Dashboard. Integrated in app.js before bootstrap().
+(function () {
+  'use strict';
+  const PD_MAX = 10;
+  const PD_PAGE = 30;
+  const PD_COLORS = ['#2F6BE4','#7C5CFC','#16A34A','#F59E0B','#475569','#EF4444','#0891B2','#C026D3','#0F766E','#C2410C'];
+  const PD_DASH = [[],[7,4],[2,3],[9,3,2,3],[12,4],[4,3],[10,2],[2,2,8,2],[6,2,2,2],[14,4]];
+  const PD_POINTS = ['circle','rect','triangle','rectRot','star','crossRot','cross','rectRounded','dash','line'];
+  let pdOutsideBound = false;
+  let pdSearchTimer = null;
+
+  function pdEsc(value) { return escapeHtml(value == null ? '' : String(value)); }
+  function pdCount(value) { return formatRecordCount(Number(value || 0)); }
+  function pdMonthEnd(period) {
+    const match = /^(\d{4})-(\d{2})$/.exec(String(period || ''));
+    if (!match) return '';
+    const day = new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).getUTCDate();
+    return `${match[1]}-${match[2]}-${String(day).padStart(2,'0')}`;
+  }
+  function pdStyle(key) {
+    let hash = 2166136261;
+    String(key || 'product').split('').forEach((char) => { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); });
+    const slot = Math.abs(hash >>> 0) % PD_COLORS.length;
+    return { color: PD_COLORS[slot], dash: PD_DASH[slot], pointStyle: PD_POINTS[slot] };
+  }
+  function pdState() {
+    const d = state.hqa.dashboard;
+    if (!Array.isArray(d.chartProducts)) d.chartProducts = [];
+    if (typeof d.chartProductSearch !== 'string') d.chartProductSearch = '';
+    if (!Number.isFinite(Number(d.chartProductPage))) d.chartProductPage = 1;
+    if (typeof d.chartProductSelectorOpen !== 'boolean') d.chartProductSelectorOpen = false;
+    if (typeof d.dashboardSearch !== 'string') d.dashboardSearch = '';
+    if (typeof d.dashboardSearchDraft !== 'string') d.dashboardSearchDraft = d.dashboardSearch;
+    if (typeof d.dashboardPeriod !== 'string') d.dashboardPeriod = '';
+    if (typeof d.selectedProduct !== 'string') d.selectedProduct = d.selectedModel || '';
+    if (!d.drilldownCache) d.drilldownCache = {};
+    if (typeof d.detailLoadingKey !== 'string') d.detailLoadingKey = '';
+    if (typeof d.roleFilter !== 'string') d.roleFilter = 'all';
+    if (typeof d.seriesWarning !== 'string') d.seriesWarning = '';
+    d.groupBy = 'product'; d.granularity = 'month';
+    return d;
+  }
+  function pdProducts(a) { return Array.isArray(a?.products) ? a.products : []; }
+  function pdProductMap(a) { return new Map(pdProducts(a).map((p) => [String(p.product_key), p])); }
+  function pdRows(a, key) { return (a?.group_periods || []).filter((r) => String(r.product_key || r.group) === String(key)).sort((x,y)=>String(x.period).localeCompare(String(y.period))); }
+  function pdRow(a,key,period) { return (a?.group_periods || []).find((r)=>String(r.product_key || r.group)===String(key) && r.period===period) || null; }
+  function pdPrev(a,key,period) { const rows=pdRows(a,key); const i=rows.findIndex((r)=>r.period===period); return i>0?rows[i-1]:null; }
+  function pdProductLabel(a,key) { return pdProductMap(a).get(String(key))?.product_label || key || 'Sản phẩm'; }
+  function pdPreserve(a, defaults) {
+    const d=pdState(), products=pdProducts(a), valid=new Set(products.map((p)=>String(p.product_key)));
+    d.chartProducts=(d.chartProducts||[]).filter((key)=>valid.has(String(key))).slice(0,PD_MAX);
+    if (defaults && !d.chartProducts.length) d.chartProducts=products.slice(0,4).map((p)=>String(p.product_key));
+    if (!valid.has(String(d.selectedProduct))) d.selectedProduct=d.chartProducts[0] || String(products[0]?.product_key || '');
+    const periods=pdRows(a,d.selectedProduct).map((r)=>r.period);
+    if (!periods.includes(d.selectedPeriod)) d.selectedPeriod=periods.at(-1) || a?.latest_period?.period || '';
+    if (!d.dashboardPeriod) d.dashboardPeriod=a?.latest_period?.period || (a?.periods||[]).at(-1) || '';
+  }
+
+  syncDashboardFiltersFromAllListings = function () {
+    const d=pdState();
+    d.appliedFilters={ keyword:d.dashboardSearch||'', marketplaces:[], brands:[], models:[], conditions:[], statuses:[], categoryNames:[], buyingOptions:[], dateFrom:'', dateTo:d.dashboardPeriod?pdMonthEnd(d.dashboardPeriod):'', minPrice:'', maxPrice:'', currency:'' };
+  };
+
+  loadHqaDashboardData = async function () {
+    const d=pdState(); d.loading=true; d.error='';
+    try {
+      const params=new URLSearchParams({group_by:'product',granularity:'month',price_drop_warning_pct:'20',price_drop_critical_pct:'30',out_of_stock_warning_points:'30',out_of_stock_critical_points:'50'});
+      if (d.dashboardSearch) params.set('keyword',d.dashboardSearch.trim());
+      if (d.dashboardPeriod) params.set('date_to',pdMonthEnd(d.dashboardPeriod));
+      const payload=await api(`/hqa/dashboard/analysis?${params.toString()}`);
+      d.analysis=payload; pdPreserve(payload,true);
+    } catch (error) { d.error=error?.message||'Không thể tải Dashboard sản phẩm.'; d.analysis=null; }
+    finally { d.loading=false; }
+  };
+
+  async function pdLoadDetail(productKey, period, force=false) {
+    if (!productKey || !period) return null;
+    const d=pdState(), cacheKey=`${productKey}@@${period}`;
+    if (!force && d.drilldownCache[cacheKey]) return d.drilldownCache[cacheKey];
+    if (d.detailLoadingKey===cacheKey) return null;
+    d.detailLoadingKey=cacheKey; renderHqaDashboard();
+    try {
+      const params=new URLSearchParams({group_by:'product',granularity:'month',keyword:productKey,date_to:pdMonthEnd(period),price_drop_warning_pct:'20',price_drop_critical_pct:'30',out_of_stock_warning_points:'30',out_of_stock_critical_points:'50'});
+      const payload=await api(`/hqa/dashboard/analysis?${params.toString()}`);
+      d.drilldownCache[cacheKey]=payload?.drilldown || null;
+      return d.drilldownCache[cacheKey];
+    } catch (error) { d.error=error?.message||'Không thể tải chi tiết sản phẩm.'; return null; }
+    finally { d.detailLoadingKey=''; renderHqaDashboard(); }
+  }
+
+  renderDashboardAlerts = function (alerts) {
+    if (!alerts?.length) return '<div class="pd-empty">Không phát hiện bất thường đáng kể trong kỳ.</div>';
+    const meta={critical:['Nghiêm trọng','pd-critical'],warning:['Đáng chú ý','pd-warning'],info:['Theo dõi','pd-info']};
+    return `<div class="pd-alert-row">${alerts.map((a)=>{ const m=meta[String(a.severity||'info').toLowerCase()]||meta.info; let metric=a.message||'';
+      if(a.type==='price_drop') metric=`Giá TB ${formatDashboardCurrency(a.previous_avg_price,a.currency)} → ${formatDashboardCurrency(a.current_avg_price,a.currency)} (${Number(a.change_percent||0).toFixed(1)}%)`;
+      if(a.type==='new_low') metric=`Đáy mới ${formatDashboardCurrency(a.current_min_price,a.currency)} · đáy cũ ${formatDashboardCurrency(a.previous_floor_price,a.currency)}`;
+      if(a.type==='new_seller') metric=`${pdCount(a.new_seller_count)} người bán mới`;
+      if(a.type==='out_of_stock_spike') metric=`Hết hàng ${Number(a.previous_out_of_stock_pct||0).toFixed(0)}% → ${Number(a.current_out_of_stock_pct||0).toFixed(0)}%`;
+      return `<button type="button" class="pd-alert ${m[1]}" data-pd-alert-product="${pdEsc(a.product_key||a.group)}" data-pd-alert-period="${pdEsc(a.period)}"><span class="pd-alert-top"><b>${pdEsc(a.product_label||a.group)}</b><i>${m[0]}</i></span><strong>${pdEsc(a.title||'Cảnh báo')}</strong><span>${pdEsc(metric)}</span><small>Xem phân tích →</small></button>`;
+    }).join('')}</div>`;
+  };
+
+  renderDashboardCharts = function (analysis) {
+    destroyHqaDashboardCharts();
+    if (typeof Chart==='undefined' || !analysis?.periods?.length) return;
+    const d=pdState(), keys=d.chartProducts||[], productMap=pdProductMap(analysis), map=new Map((analysis.group_periods||[]).map((r)=>[`${r.product_key||r.group}@@${r.period}`,r]));
+    if (!keys.length) return;
+    const datasets=(field)=>keys.map((key)=>{ const s=pdStyle(key); return { label:productMap.get(String(key))?.product_label||key, data:analysis.periods.map((period)=>{const r=map.get(`${key}@@${period}`); const v=r?Number(r[field]):NaN; return Number.isFinite(v)?v:null;}), borderColor:s.color, backgroundColor:s.color, borderDash:s.dash, pointStyle:s.pointStyle, borderWidth:2, pointRadius:3, pointHoverRadius:5, tension:.28, spanGaps:false }; });
+    const options=(formatter)=>({responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>`${ctx.dataset.label}: ${formatter(ctx.parsed.y)}`}}},scales:{x:{grid:{display:false},ticks:{color:'#64748B',maxTicksLimit:8}},y:{grid:{color:'#EDF1F7'},border:{display:false},ticks:{color:'#64748B',callback:formatter}}}});
+    const price=document.getElementById('pd-price-chart'); if(price) hqaDashboardCharts.push(new Chart(price,{type:'line',data:{labels:analysis.periods,datasets:datasets('avg_price')},options:options((v)=>formatDashboardCurrency(v,analysis.latest_period?.currency||'USD'))}));
+    const sellers=document.getElementById('pd-seller-chart'); if(sellers) hqaDashboardCharts.push(new Chart(sellers,{type:'line',data:{labels:analysis.periods,datasets:datasets('seller_count')},options:options((v)=>formatDashboardNumber(v,0))}));
+  };
+
+  function pdSelector(analysis) {
+    const d=pdState(), all=pdProducts(analysis), q=d.chartProductSearch.trim().toLowerCase();
+    const filtered=all.filter((p)=>!q || [p.product_label,p.keyword,p.brand,p.model,p.product_id].some((v)=>String(v||'').toLowerCase().includes(q)));
+    const visible=filtered.slice(0,Math.max(PD_PAGE,Number(d.chartProductPage||1)*PD_PAGE));
+    const selected=d.chartProducts||[], map=pdProductMap(analysis), chips=selected.slice(0,3).map((key)=>`<span>${pdEsc(map.get(String(key))?.product_label||key)}</span>`).join('') + (selected.length>3?`<span>+${selected.length-3}</span>`:'');
+    return `<div class="pd-series"><button type="button" class="pd-series-trigger" id="pd-series-trigger" aria-expanded="${d.chartProductSelectorOpen?'true':'false'}"><span class="pd-chip-wrap">${chips||'<em>Chọn sản phẩm để so sánh</em>'}</span><b>${selected.length}/${PD_MAX} ▾</b></button>${d.chartProductSelectorOpen?`<div class="pd-series-menu" role="dialog" aria-label="Chọn sản phẩm cho biểu đồ"><input id="pd-series-search" type="search" placeholder="Tìm theo tên sản phẩm, brand, model..." value="${pdEsc(d.chartProductSearch)}"><div class="pd-series-actions"><label><input id="pd-series-all" type="checkbox"> Chọn tất cả đã tải</label><button type="button" data-pd-series-clear>Clear</button></div>${d.seriesWarning?`<div class="pd-limit">${pdEsc(d.seriesWarning)}</div>`:''}<div class="pd-series-list">${visible.map((p)=>`<label class="pd-series-option"><input type="checkbox" data-pd-series-key="${pdEsc(p.product_key)}" ${selected.includes(String(p.product_key))?'checked':''}><span><b>${pdEsc(p.product_label)}</b><small>${pdEsc([p.brand,p.model,p.product_type].filter(Boolean).join(' · '))}</small></span><i>${pdCount(p.listing_count)} listing · ${pdCount(p.seller_count)} seller${Number(p.excluded_count||0)?` · ${pdCount(p.excluded_count)} excluded`:''}</i></label>`).join('')||'<div class="pd-empty">Không tìm thấy sản phẩm.</div>'}</div><div class="pd-series-footer">${visible.length<filtered.length?'<button type="button" data-pd-series-more>Load more</button>':'<span>Đã tải hết</span>'}</div></div>`:''}</div>`;
+  }
+
+  function pdLegend(analysis) { const map=pdProductMap(analysis); return (pdState().chartProducts||[]).map((key)=>{const s=pdStyle(key); return `<span class="pd-legend"><i style="background:${s.color}"></i>${pdEsc(map.get(String(key))?.product_label||key)}</span>`;}).join(''); }
+  function pdDelta(current,previous,suffix='') { const a=Number(current),b=Number(previous); if(!Number.isFinite(a)||!Number.isFinite(b)) return '—'; const d=a-b; return `${d>0?'+':''}${suffix==='%'?d.toFixed(1):formatDashboardNumber(d,0)}${suffix}`; }
+  function pdRoleFilter(row,filter) { if(filter==='all') return true; if(filter==='other') return ['documentation_media','irrelevant'].includes(row.listing_role); if(filter==='components') return row.listing_role==='component_part'; if(filter==='accessories') return row.listing_role==='accessory'; if(filter==='whole') return row.listing_role==='whole_product'; if(filter==='uncertain') return row.listing_role==='uncertain'; return true; }
+  function pdRoleBadge(role) { const label={whole_product:'Sản phẩm hoàn chỉnh',component_part:'Linh kiện',accessory:'Phụ kiện',documentation_media:'Tài liệu',irrelevant:'Không liên quan',uncertain:'Chưa chắc chắn'}[role]||role; return `<span class="pd-role pd-role-${pdEsc(role)}">${pdEsc(label)}</span>`; }
+  function pdCsv(rows,filename) { if(!rows?.length){pdState().error='Không có dữ liệu để xuất CSV.';renderHqaDashboard();return;} const headers=[...rows.reduce((s,r)=>{Object.keys(r).forEach((k)=>s.add(k));return s;},new Set())]; const text='\ufeff'+headers.map(dashboardCsvCell).join(',')+'\r\n'+rows.map((r)=>headers.map((h)=>dashboardCsvCell(r[h])).join(',')).join('\r\n'); const url=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})); const a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url); }
+
+  downloadDashboardCsv = function (dataset) {
+    const d=pdState(), a=d.analysis; if(!a)return; let rows=[],name=`hqa_dashboard_${dataset}.csv`;
+    if(dataset==='group_period') rows=(a.group_periods||[]).map((r)=>({...r,top_sellers:undefined,new_sellers:(r.new_sellers||[]).join(' | ')}));
+    if(dataset==='alerts') rows=(a.alerts||[]).map((r)=>({...r,new_sellers:(r.new_sellers||[]).join(' | ')}));
+    const detail=d.drilldownCache[`${d.selectedProduct}@@${d.selectedPeriod}`];
+    if(dataset==='top_sellers') rows=(detail?.current?.top_sellers||[]).map((r,i)=>({rank:i+1,product:detail.product?.product_label,period:d.selectedPeriod,...r,currency:detail.current?.currency}));
+    if(dataset==='role_audit') rows=(detail?.related_listings||[]).map((r)=>({...r,role_reasons:(r.role_reasons||[]).join(' | ')}));
+    pdCsv(rows,name);
+  };
+
+  function pdDetail(analysis) {
+    const d=pdState(), product=pdProductMap(analysis).get(String(d.selectedProduct)), rows=pdRows(analysis,d.selectedProduct), periods=rows.map((r)=>r.period), cacheKey=`${d.selectedProduct}@@${d.selectedPeriod}`, detail=d.drilldownCache[cacheKey], current=detail?.current||pdRow(analysis,d.selectedProduct,d.selectedPeriod), previous=detail?.previous||pdPrev(analysis,d.selectedProduct,d.selectedPeriod), loading=d.detailLoadingKey===cacheKey;
+    if(!product) return '<div class="pd-empty">Chưa có sản phẩm để phân tích.</div>';
+    const color=pdStyle(product.product_key).color, recommendation=current?buildDashboardRecommendation(current,previous):null, priceChange=current&&previous?dashboardPercentChange(current.avg_price,previous.avg_price):null;
+    const breakdown=detail?.role_breakdown||{}; const related=(detail?.related_listings||[]).filter((r)=>pdRoleFilter(r,d.roleFilter));
+    return `<section class="pd-panel pd-analysis" id="pd-analysis" tabindex="-1"><div class="pd-panel-head"><div><h3>Phân tích theo Sản phẩm &amp; thời điểm</h3><p>Chọn Sản phẩm và kỳ để xem dải giá, xu hướng 6 kỳ, gợi ý niêm yết, người bán và listing liên quan.</p></div></div><div class="pd-detail-controls"><label>Sản phẩm<select id="pd-detail-product">${pdProducts(analysis).map((p)=>`<option value="${pdEsc(p.product_key)}" ${String(p.product_key)===String(d.selectedProduct)?'selected':''}>${pdEsc(p.product_label)}</option>`).join('')}</select></label><label>Kỳ<select id="pd-detail-period">${periods.map((p)=>`<option ${p===d.selectedPeriod?'selected':''}>${pdEsc(p)}</option>`).join('')}</select></label></div><div class="pd-product-title"><b style="color:${color}">${pdEsc(product.product_label)}</b><span>${pdEsc([product.brand,product.model,product.product_id].filter(Boolean).join(' · '))}</span>${current?`<small>${pdCount(current.listing_count)} whole-product / ${pdCount(current.related_listing_count)} liên quan · CV ${Number(current.cv||0).toFixed(1)}%</small>`:''}</div>${loading?'<div class="pd-loading">Đang tải listing liên quan...</div>':''}${current?`<div class="pd-mini-grid">${[['Listing hợp lệ',current.listing_count],['Listing liên quan',current.related_listing_count],['Người bán',current.seller_count],['Min',formatDashboardCurrency(current.min_price,current.currency)],['Median',formatDashboardCurrency(current.median_price,current.currency)],['Avg',formatDashboardCurrency(current.avg_price,current.currency)],['Max',formatDashboardCurrency(current.max_price,current.currency)],['% hết hàng',`${Number(current.out_of_stock_pct||0).toFixed(1)}%`]].map(([l,v])=>`<div><span>${l}</span><strong>${v}</strong></div>`).join('')}</div><div class="pd-note">Dữ liệu giá dùng ${pdCount(current.price_sample||0)}/${pdCount(current.related_listing_count||0)} listing; đã loại ${pdCount(current.excluded_from_market_analytics_count||0)} listing không phải sản phẩm hoàn chỉnh.</div><div class="pd-role-grid">${[['whole_product','Sản phẩm hoàn chỉnh'],['component_part','Linh kiện'],['accessory','Phụ kiện'],['documentation_media','Tài liệu'],['irrelevant','Không liên quan'],['uncertain','Chưa chắc chắn']].map(([role,label])=>`<div>${pdRoleBadge(role)}<strong>${pdCount(breakdown[role]??(role==='whole_product'?current.whole_product_count:0))}</strong><small>${label}</small></div>`).join('')}</div><div class="dashboard-range-panel"><div class="dashboard-section-label">Dải giá trên thị trường</div>${renderDashboardRangeSvg(current,color,current.currency)}</div><div class="pd-two"><div class="dashboard-spark-panel"><div class="dashboard-section-label">Xu hướng giá TB 6 kỳ</div>${renderDashboardSparkline(rows,d.selectedPeriod,color)}<p>${priceChange===null?'Chưa có kỳ trước để so sánh.':`So kỳ trước: giá TB ${priceChange<0?'giảm':'tăng'} ${Math.abs(priceChange).toFixed(1)}%; người bán ${pdDelta(current.seller_count,previous?.seller_count)}; CV ${Number(current.cv||0).toFixed(1)}%.`}</p></div><div class="dashboard-spark-panel"><div class="dashboard-section-label">Gợi ý giá niêm yết</div>${recommendation?`<div class="pd-recommend">${recommendation.items.map((x)=>`<div class="${x.label===recommendation.recommended?'active':''}"><span>${pdEsc(x.label)}<small>${pdEsc(x.note)}</small></span><strong>${formatDashboardCurrency(x.value,current.currency)}</strong></div>`).join('')}</div><p>${pdEsc(recommendation.reason)}</p>`:'<div class="pd-empty">Không đủ dữ liệu giá.</div>'}</div></div><div class="dashboard-top-sellers-panel"><div class="dashboard-section-label">Top 10 người bán</div>${renderDashboardTopSellers(current.top_sellers||[],color,current.currency,current.seller_count)}</div>`:'<div class="pd-empty">Không có đủ listing sản phẩm hoàn chỉnh để phân tích giá trong kỳ này.</div>'}${detail?`<div class="pd-listings"><div class="pd-listings-head"><h4>Listings của sản phẩm</h4><div>${[['all','All'],['whole','Whole product'],['components','Components'],['accessories','Accessories'],['other','Other'],['uncertain','Uncertain']].map(([v,l])=>`<button type="button" data-pd-role-filter="${v}" class="${d.roleFilter===v?'active':''}">${l}</button>`).join('')}</div></div><div class="table-wrap"><table><thead><tr><th>Listing title</th><th>Role</th><th>Confidence</th><th>Reason</th><th>Marketplace</th><th>Seller</th><th>Price</th><th>Condition</th><th>Category</th><th>Status</th><th>Listing ID</th></tr></thead><tbody>${related.map((r)=>`<tr><td><a href="${pdEsc(r.listing_url||'#')}" target="_blank" rel="noopener">${pdEsc(r.listing_title||'-')}</a></td><td>${pdRoleBadge(r.listing_role)}</td><td>${pdCount(r.role_confidence)}%</td><td title="${pdEsc((r.role_reasons||[]).join('; '))}">${pdEsc((r.role_reasons||[]).join('; '))}</td><td>${pdEsc(r.marketplace||'-')}</td><td>${pdEsc(r.seller||'-')}</td><td>${formatDashboardCurrency(r.price,r.currency)}</td><td>${pdEsc(r.condition||'-')}</td><td>${pdEsc(r.category||'-')}</td><td>${pdEsc(r.status||'-')}</td><td>${pdEsc(r.listing_id||'-')}</td></tr>`).join('')||'<tr><td colspan="11">Không có listing theo bộ lọc role.</td></tr>'}</tbody></table></div></div>`:''}</section>`;
+  }
+
+  renderHqaDashboard = function () {
+    const view=document.getElementById('hqa-dashboard-view'); if(!view)return; const d=pdState(),a=d.analysis; destroyHqaDashboardCharts();
+    if(d.loading&&!a){view.innerHTML='<div class="dashboard-loading"><span class="loading-spinner"></span><span>Đang phân tích dữ liệu sản phẩm...</span></div>';return;}
+    if(!a){view.innerHTML=`${d.error?`<div class="error">${pdEsc(d.error)}</div>`:''}<div class="pd-empty">Chưa có dữ liệu Dashboard.</div>`;return;}
+    pdPreserve(a,false); const latest=a.latest_period||{}, periods=a.periods||[], noWhole=Number(latest.listing_count||0)===0, uncertain=Number(latest.uncertain_pct||0);
+    view.innerHTML=`<div class="pd-dashboard"><div class="pd-toolbar"><div><b>Marketing Dashboard</b><span>Listing thực tế → Sản phẩm → phân loại role → whole-product analytics</span></div><label>Tháng<select id="pd-month"><option value="">Mới nhất</option>${periods.map((p)=>`<option value="${pdEsc(p)}" ${d.dashboardPeriod===p?'selected':''}>${pdEsc(p)}</option>`).join('')}</select></label><label class="pd-global-search">Sản phẩm / Keyword<div><input id="pd-global-search" value="${pdEsc(d.dashboardSearchDraft)}" placeholder="JBL L26, Yamaha FG800..."><button type="button" id="pd-global-apply">Lọc</button>${d.dashboardSearch?'<button type="button" id="pd-global-clear" class="secondary">Xóa</button>':''}</div></label><div class="pd-export"><button data-pd-export="group_period">Tổng hợp CSV</button><button data-pd-export="alerts">Cảnh báo CSV</button><button data-pd-export="top_sellers">Top 10 CSV</button><button data-pd-export="role_audit">Role audit CSV</button></div></div>${d.error?`<div class="error">${pdEsc(d.error)}</div>`:''}${uncertain>=15?`<div class="pd-quality">${uncertain.toFixed(1)}% listing chưa phân loại chắc chắn; market analytics đang loại các listing này.</div>`:''}${noWhole?`<div class="pd-quality neutral">${Number(latest.related_listing_count||0)>0?`Có ${pdCount(latest.related_listing_count)} listing liên quan nhưng chưa có listing sản phẩm hoàn chỉnh đủ điều kiện phân tích.`:'Không có đủ listing sản phẩm hoàn chỉnh để phân tích giá trong kỳ này.'}</div>`:''}<div class="pd-kpis">${[['Listing phân tích',pdCount(latest.listing_count),`${pdCount(latest.whole_product_count)} whole-product / ${pdCount(latest.related_listing_count)} liên quan`],['Sản phẩm',pdCount(latest.product_count),'có whole-product data'],['Người bán',pdCount(latest.seller_count),'distinct seller'],['Giá trung vị',formatDashboardCurrency(latest.median_price,latest.currency),'whole-product listings'],['Hết hàng',pdCount(latest.out_of_stock_count),`${Number(latest.out_of_stock_pct||0).toFixed(1)}% whole-product`]].map(([l,v,s])=>`<article><span>${l}</span><strong>${v}</strong><small>${s}</small></article>`).join('')}</div><section class="pd-panel"><div class="pd-panel-head"><div><h3>Cảnh báo bất thường</h3><p>Whole-product analytics · click để xem đúng Sản phẩm × kỳ.</p></div><b>${pdCount((a.alerts||[]).length)} cảnh báo</b></div>${renderDashboardAlerts(a.alerts||[])}</section><section class="pd-panel"><div class="pd-panel-head"><div><h3>Xu hướng thị trường theo sản phẩm</h3><p>Một selector chung điều khiển cả hai chart.</p></div></div>${pdSelector(a)}<div class="pd-chart-grid"><article><h4>Giá trung bình theo tháng</h4><p>AVG(price) · whole_product eligible</p><div class="pd-legend-row">${pdLegend(a)}</div><div class="pd-canvas">${d.chartProducts.length?'<canvas id="pd-price-chart"></canvas>':'<div class="pd-empty">Chọn ít nhất 1 sản phẩm để hiển thị biểu đồ.</div>'}</div></article><article><h4>Số người bán theo tháng</h4><p>COUNT DISTINCT seller · whole_product eligible</p><div class="pd-legend-row">${pdLegend(a)}</div><div class="pd-canvas">${d.chartProducts.length?'<canvas id="pd-seller-chart"></canvas>':'<div class="pd-empty">Chọn ít nhất 1 sản phẩm để hiển thị biểu đồ.</div>'}</div></article></div></section>${pdDetail(a)}</div>`;
+    pdBind(view); renderDashboardCharts(a);
+    const key=`${d.selectedProduct}@@${d.selectedPeriod}`; if(d.selectedProduct&&d.selectedPeriod&&!d.drilldownCache[key]&&!d.detailLoadingKey) setTimeout(()=>pdLoadDetail(d.selectedProduct,d.selectedPeriod),0);
+  };
+
+  function pdBind(view) {
+    const d=pdState(),a=d.analysis;
+    view.querySelector('#pd-month')?.addEventListener('change',async(e)=>{d.dashboardPeriod=e.target.value;d.selectedPeriod='';await loadHqaDashboardData();renderHqaDashboard();});
+    const search=view.querySelector('#pd-global-search'); if(search){search.addEventListener('input',(e)=>{d.dashboardSearchDraft=e.target.value;});search.addEventListener('keydown',(e)=>{if(e.key==='Enter'){e.preventDefault();view.querySelector('#pd-global-apply')?.click();}});}
+    view.querySelector('#pd-global-apply')?.addEventListener('click',async()=>{d.dashboardSearch=d.dashboardSearchDraft.trim();d.chartProducts=[];d.selectedProduct='';d.drilldownCache={};await loadHqaDashboardData();renderHqaDashboard();});
+    view.querySelector('#pd-global-clear')?.addEventListener('click',async()=>{d.dashboardSearch='';d.dashboardSearchDraft='';d.chartProducts=[];d.selectedProduct='';d.drilldownCache={};await loadHqaDashboardData();renderHqaDashboard();});
+    view.querySelector('#pd-series-trigger')?.addEventListener('click',(e)=>{e.stopPropagation();d.chartProductSelectorOpen=!d.chartProductSelectorOpen;d.seriesWarning='';renderHqaDashboard();});
+    view.querySelector('#pd-series-search')?.addEventListener('input',(e)=>{clearTimeout(pdSearchTimer); const value=e.target.value;pdSearchTimer=setTimeout(()=>{d.chartProductSearch=value;d.chartProductPage=1;renderHqaDashboard();},180);});
+    view.querySelectorAll('[data-pd-series-key]').forEach((input)=>input.addEventListener('change',()=>{const key=String(input.dataset.pdSeriesKey); if(input.checked&&!d.chartProducts.includes(key)){if(d.chartProducts.length>=PD_MAX){d.seriesWarning='Chỉ có thể hiển thị tối đa 10 sản phẩm cùng lúc để biểu đồ dễ đọc.';}else d.chartProducts=[...d.chartProducts,key];}else if(!input.checked)d.chartProducts=d.chartProducts.filter((x)=>x!==key);renderHqaDashboard();}));
+    view.querySelector('#pd-series-all')?.addEventListener('change',(e)=>{if(!e.target.checked)return;const q=d.chartProductSearch.trim().toLowerCase(), visible=pdProducts(a).filter((p)=>!q||[p.product_label,p.keyword,p.brand,p.model,p.product_id].some((v)=>String(v||'').toLowerCase().includes(q))).slice(0,Math.max(PD_PAGE,d.chartProductPage*PD_PAGE));const slots=PD_MAX-d.chartProducts.length;const add=visible.map((p)=>String(p.product_key)).filter((k)=>!d.chartProducts.includes(k)).slice(0,slots);d.chartProducts=[...d.chartProducts,...add];if(add.length<visible.filter((p)=>!d.chartProducts.includes(String(p.product_key))).length)d.seriesWarning='Chỉ có thể hiển thị tối đa 10 sản phẩm cùng lúc để biểu đồ dễ đọc.';renderHqaDashboard();});
+    view.querySelector('[data-pd-series-clear]')?.addEventListener('click',()=>{d.chartProducts=[];d.seriesWarning='';renderHqaDashboard();});
+    view.querySelector('[data-pd-series-more]')?.addEventListener('click',()=>{d.chartProductPage+=1;renderHqaDashboard();});
+    view.querySelectorAll('[data-pd-alert-product]').forEach((btn)=>btn.addEventListener('click',async()=>{d.selectedProduct=btn.dataset.pdAlertProduct;d.selectedPeriod=btn.dataset.pdAlertPeriod;await pdLoadDetail(d.selectedProduct,d.selectedPeriod,true);const section=document.getElementById('pd-analysis');section?.scrollIntoView({behavior:'smooth',block:'start'});section?.classList.add('pd-highlight');section?.focus({preventScroll:true});setTimeout(()=>section?.classList.remove('pd-highlight'),1600);}));
+    view.querySelector('#pd-detail-product')?.addEventListener('change',async(e)=>{d.selectedProduct=e.target.value;const periods=pdRows(a,d.selectedProduct).map((r)=>r.period);d.selectedPeriod=periods.at(-1)||'';await pdLoadDetail(d.selectedProduct,d.selectedPeriod);});
+    view.querySelector('#pd-detail-period')?.addEventListener('change',async(e)=>{d.selectedPeriod=e.target.value;await pdLoadDetail(d.selectedProduct,d.selectedPeriod);});
+    view.querySelectorAll('[data-pd-role-filter]').forEach((btn)=>btn.addEventListener('click',()=>{d.roleFilter=btn.dataset.pdRoleFilter;renderHqaDashboard();}));
+    view.querySelectorAll('[data-pd-export]').forEach((btn)=>btn.addEventListener('click',()=>downloadDashboardCsv(btn.dataset.pdExport)));
+    if(!pdOutsideBound){pdOutsideBound=true;document.addEventListener('click',(e)=>{if(!pdState().chartProductSelectorOpen)return;if(e.target.closest?.('.pd-series'))return;pdState().chartProductSelectorOpen=false;if(state.hqa.mainTab==='dashboard')renderHqaDashboard();});document.addEventListener('keydown',(e)=>{if(e.key==='Escape'&&pdState().chartProductSelectorOpen){pdState().chartProductSelectorOpen=false;if(state.hqa.mainTab==='dashboard')renderHqaDashboard();}});}
+  }
+
+  pdState();
+})();
+// --- end HQA Dashboard Product Analytics v5 ---
+
 bootstrap();

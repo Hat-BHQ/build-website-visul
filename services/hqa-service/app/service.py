@@ -4265,3 +4265,282 @@ def fetch_hqa_dashboard_export_rows(
             out_of_stock_alert_percent=out_of_stock_alert_percent,
         )["alerts"]
     raise ValueError("Invalid dataset")
+
+# --- HQA Dashboard Product Analytics v5 (integrated) ---
+# HQA product-first dashboard analytics. Integrated in service.py.
+_PD_ROLE_WHOLE = "whole_product"
+_PD_ROLE_COMPONENT = "component_part"
+_PD_ROLE_ACCESSORY = "accessory"
+_PD_ROLE_DOC = "documentation_media"
+_PD_ROLE_IRRELEVANT = "irrelevant"
+_PD_ROLE_UNCERTAIN = "uncertain"
+_PD_CATALOG_CACHE = None
+_PD_COMPONENT_WORDS = ("woofer", "driver", "tweeter", "crossover", "terminal", "foam", "surround", "cone", "diaphragm", "board", "pcb", "module", "transformer", "knob", "switch", "jack", "frame", "voice coil", "dust cap", "repair kit", "edge ring", "replacement", "enclosure only", "cabinet only", "speaker part", "parts only")
+_PD_ACCESSORY_WORDS = ("grill", "grille", "cover", "stand", "mount", "case", "skin", "badge", "cable", "remote", "bracket", "dust cover")
+_PD_DOC_WORDS = ("service manual", "owner manual", "owners manual", "manual", "brochure", "catalog", "catalogue", "schematic", "book", "service guide", "repair manual", "dealer literature")
+_PD_WHOLE_WORDS = ("pair speakers", "speakers pair", "speaker pair", "stereo receiver", "integrated amplifier", "power amplifier", "acoustic guitar", "electric guitar", "turntable", "complete", "fully working", "tested working", "restored")
+
+
+def _pd_text(value):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+
+def _pd_hits(text_value, words):
+    return [word for word in words if word in text_value]
+
+
+def _pd_catalog():
+    global _PD_CATALOG_CACHE
+    if _PD_CATALOG_CACHE is None:
+        _PD_CATALOG_CACHE = tuple(load_keyword_catalog()["usable_entries"])
+    return _PD_CATALOG_CACHE
+
+
+def _pd_product_label(entry):
+    keyword = str(entry.keyword or "").strip()
+    tokens = keyword.split()
+    if len(tokens) >= 2 and keyword.lower() not in {str(entry.brand or "").strip().lower(), str(entry.model or "").strip().lower()}:
+        return keyword
+    return " ".join(part for part in (str(entry.brand or "").strip(), str(entry.model or "").strip(), str(entry.category or "").strip()) if part) or entry.product_id
+
+
+def _pd_identity(row):
+    title = normalize_match_text(row.get("listing_title"))
+    brand = normalize_match_text(row.get("brand"))
+    model = normalize_match_text(row.get("model"))
+    ranked = []
+    for entry in _pd_catalog():
+        score = 0
+        reasons = []
+        if brand and entry.normalized_brand:
+            score += 3 if brand == entry.normalized_brand else -3
+            if brand == entry.normalized_brand:
+                reasons.append("brand matches catalog")
+        if model and entry.normalized_model:
+            score += 8 if model == entry.normalized_model else -7
+            if model == entry.normalized_model:
+                reasons.append("model matches catalog")
+        if entry.normalized_brand and entry.normalized_brand in title:
+            score += 2
+        if entry.normalized_model and entry.normalized_model in title:
+            score += 7
+            reasons.append("title contains catalog model")
+        if entry.normalized_keyword and entry.normalized_keyword in title:
+            score += 4
+            reasons.append("title matches catalog keyword")
+        if (entry.normalized_model and entry.normalized_model in title) or (model and model == entry.normalized_model) or (entry.normalized_keyword and entry.normalized_keyword in title):
+            if score >= 7:
+                ranked.append((score, entry, reasons))
+    if ranked:
+        ranked.sort(key=lambda item: (-item[0], item[1].product_id, item[1].keyword.lower()))
+        score, entry, reasons = ranked[0]
+        if len(ranked) > 1 and ranked[1][1].product_id != entry.product_id and score - ranked[1][0] < 2 and score < 14:
+            return None
+        return {
+            "product_key": str(entry.product_id or "").strip() or f"fallback:{entry.normalized_brand}:{entry.normalized_model}:{entry.normalized_keyword}",
+            "product_id": str(entry.product_id or "").strip() or None,
+            "product_label": _pd_product_label(entry),
+            "keyword": str(entry.keyword or "").strip(),
+            "brand": str(entry.brand or "").strip(),
+            "model": str(entry.model or "").strip(),
+            "product_type": str(entry.category or "").strip(),
+            "identity_confidence": max(55, min(99, 58 + score * 3)),
+            "identity_reasons": reasons,
+        }
+    raw_brand = str(row.get("brand") or "").strip()
+    raw_model = str(row.get("model") or "").strip()
+    raw_category = str(row.get("category") or row.get("category_name") or "").strip()
+    if raw_brand and raw_model:
+        return {
+            "product_key": f"fallback:{normalize_match_text(raw_brand)}:{normalize_match_text(raw_model)}:{normalize_match_text(raw_category)}",
+            "product_id": None,
+            "product_label": f"{raw_brand} {raw_model}".strip(),
+            "keyword": "",
+            "brand": raw_brand,
+            "model": raw_model,
+            "product_type": raw_category,
+            "identity_confidence": 68,
+            "identity_reasons": ["fallback brand + model + category"],
+        }
+    return None
+
+
+def _pd_classify(row, product, reference_median=None):
+    title = _pd_text(row.get("listing_title"))
+    category = _pd_text(f"{row.get('category') or ''} {row.get('category_name') or ''}")
+    condition = _pd_text(row.get("condition"))
+    scores = {_PD_ROLE_WHOLE: 0, _PD_ROLE_COMPONENT: 0, _PD_ROLE_ACCESSORY: 0, _PD_ROLE_DOC: 0, _PD_ROLE_IRRELEVANT: 0}
+    reasons = defaultdict(list)
+    component = _pd_hits(title, _PD_COMPONENT_WORDS)
+    accessory = _pd_hits(title, _PD_ACCESSORY_WORDS)
+    docs = _pd_hits(title, _PD_DOC_WORDS)
+    whole = _pd_hits(title, _PD_WHOLE_WORDS)
+    if component:
+        scores[_PD_ROLE_COMPONENT] += 7 + min(3, len(component) - 1); reasons[_PD_ROLE_COMPONENT].append("title: " + ", ".join(component[:3]))
+    if accessory:
+        scores[_PD_ROLE_ACCESSORY] += 6 + min(2, len(accessory) - 1); reasons[_PD_ROLE_ACCESSORY].append("title: " + ", ".join(accessory[:3]))
+    if docs:
+        scores[_PD_ROLE_DOC] += 8; reasons[_PD_ROLE_DOC].append("documentation title: " + ", ".join(docs[:2]))
+    if whole:
+        scores[_PD_ROLE_WHOLE] += 4 + min(2, len(whole) - 1); reasons[_PD_ROLE_WHOLE].append("whole-product title: " + ", ".join(whole[:2]))
+    if any(word in category for word in ("parts", "components", "woofers", "drivers", "tweeters")):
+        scores[_PD_ROLE_COMPONENT] += 5; reasons[_PD_ROLE_COMPONENT].append("category suggests component")
+    if any(word in category for word in ("accessories", "covers", "mounts", "cases")):
+        scores[_PD_ROLE_ACCESSORY] += 4; reasons[_PD_ROLE_ACCESSORY].append("category suggests accessory")
+    if any(word in category for word in ("manual", "books", "catalog")):
+        scores[_PD_ROLE_DOC] += 5; reasons[_PD_ROLE_DOC].append("category suggests documentation")
+    if any(word in category for word in ("speakers", "receiver", "amplifier", "turntable", "guitar", "home audio")):
+        scores[_PD_ROLE_WHOLE] += 2; reasons[_PD_ROLE_WHOLE].append("category supports whole product")
+    if int(product.get("identity_confidence") or 0) >= 80:
+        scores[_PD_ROLE_WHOLE] += 2; reasons[_PD_ROLE_WHOLE].append("strong product linkage")
+    if normalize_match_text(product.get("model")) and normalize_match_text(product.get("model")) in normalize_match_text(row.get("listing_title")):
+        scores[_PD_ROLE_WHOLE] += 1
+    if "for parts" in condition or "not working" in condition:
+        reasons[_PD_ROLE_WHOLE].append("for-parts/not-working is condition only")
+    if bool(row.get("exclude_flag")):
+        scores[_PD_ROLE_IRRELEVANT] += 2; reasons[_PD_ROLE_IRRELEVANT].append("exclude_flag caution")
+    price = _safe_float(row.get("price"))
+    if reference_median and reference_median > 0 and price is not None:
+        ratio = price / reference_median
+        if ratio < .18 and scores[_PD_ROLE_COMPONENT] >= 4:
+            scores[_PD_ROLE_COMPONENT] += 2; reasons[_PD_ROLE_COMPONENT].append(f"price {ratio:.0%} of whole reference")
+        elif ratio < .30 and scores[_PD_ROLE_ACCESSORY] >= 4:
+            scores[_PD_ROLE_ACCESSORY] += 1; reasons[_PD_ROLE_ACCESSORY].append(f"price {ratio:.0%} of whole reference")
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    role, top = ranked[0]
+    second = ranked[1][1]
+    if top < 3 or (top - second <= 1 and second >= 3):
+        role = _PD_ROLE_UNCERTAIN
+        role_reasons = ["conflicting or insufficient role evidence"]
+        confidence = 55
+    else:
+        role_reasons = reasons[role] or ["deterministic multi-signal score"]
+        confidence = max(60, min(99, 55 + top * 5 - max(0, second) * 2))
+    return {"listing_role": role, "role_confidence": confidence, "role_reasons": role_reasons[:4], "eligible_for_market_analytics": role == _PD_ROLE_WHOLE and confidence >= 65}
+
+
+def _pd_finalize(items, currency):
+    eligible = [item for item in items if item["classification"]["eligible_for_market_analytics"]]
+    prices = [float(item["row"]["price"]) for item in eligible if item["row"].get("price") is not None]
+    sellers = {str(item["row"].get("seller_or_shop") or "").strip() for item in eligible if str(item["row"].get("seller_or_shop") or "").strip()}
+    listing_ids = {str(item["row"].get("listing_id") or "").strip() for item in eligible if str(item["row"].get("listing_id") or "").strip()}
+    roles = defaultdict(int)
+    for item in items: roles[item["classification"]["listing_role"]] += 1
+    average = sum(prices) / len(prices) if prices else None
+    std = (sum((value-average)**2 for value in prices)/len(prices))**.5 if prices and average is not None else None
+    oos = sum(1 for item in eligible if str(item["row"].get("listing_status") or "").strip().lower() == "out_of_stock")
+    seller_rows = defaultdict(list)
+    for item in eligible:
+        seller = str(item["row"].get("seller_or_shop") or "").strip()
+        price = _safe_float(item["row"].get("price"))
+        if seller: seller_rows[seller].append(price)
+    top_sellers = []
+    for seller, vals in seller_rows.items():
+        priced = [v for v in vals if v is not None]
+        top_sellers.append({"seller": seller, "listing_count": len(vals), "avg_price": round(sum(priced)/len(priced),2) if priced else None, "min_price": round(min(priced),2) if priced else None})
+    top_sellers.sort(key=lambda x: (-x["listing_count"], x["avg_price"] if x["avg_price"] is not None else float("inf"), x["seller"].lower()))
+    currencies = {str(item["row"].get("currency") or "").strip().upper() for item in eligible if str(item["row"].get("currency") or "").strip()}
+    return {
+        "listing_count": len(eligible), "unique_ids": len(listing_ids), "seller_count": len(sellers), "seller_names": sellers,
+        "price_sample": len(prices), "min_price": round(min(prices),2) if prices else None, "max_price": round(max(prices),2) if prices else None,
+        "avg_price": round(average,2) if average is not None else None, "median_price": round(_median(prices),2) if prices else None,
+        "p25": round(_percentile(prices,.25),2) if prices else None, "p75": round(_percentile(prices,.75),2) if prices else None,
+        "std": round(std,2) if std is not None else None, "cv": round((std/average)*100,2) if std is not None and average else None,
+        "out_of_stock_count": oos, "out_of_stock_pct": round((oos/len(eligible))*100,2) if eligible else 0.0,
+        "related_listing_count": len(items), "whole_product_count": roles[_PD_ROLE_WHOLE], "component_count": roles[_PD_ROLE_COMPONENT],
+        "accessory_count": roles[_PD_ROLE_ACCESSORY], "documentation_count": roles[_PD_ROLE_DOC], "irrelevant_count": roles[_PD_ROLE_IRRELEVANT],
+        "uncertain_count": roles[_PD_ROLE_UNCERTAIN], "excluded_from_market_analytics_count": len(items)-len(eligible),
+        "currency": next(iter(currencies)) if len(currencies)==1 else ("MIXED" if currencies else (currency or "USD")), "top_sellers": top_sellers[:10],
+    }
+
+
+def _pd_audit(item):
+    row, cls = item["row"], item["classification"]
+    return {"listing_id": row.get("listing_id"), "listing_title": row.get("listing_title"), "listing_url": row.get("listing_url"), "marketplace": row.get("marketplace"), "seller": row.get("seller_or_shop"), "price": row.get("price"), "currency": row.get("currency"), "condition": row.get("condition"), "category": row.get("category_name") or row.get("category"), "status": row.get("listing_status"), "listing_role": cls["listing_role"], "role_confidence": cls["role_confidence"], "role_reasons": cls["role_reasons"], "eligible_for_market_analytics": cls["eligible_for_market_analytics"]}
+
+
+def _fetch_hqa_dashboard_analysis_product(db, *, keyword, marketplaces, brands, models, conditions, statuses, category_names, buying_options, currency, date_from, date_to, min_price, max_price, group_by="product", granularity="month", price_drop_warning_pct=20.0, price_drop_critical_pct=30.0, out_of_stock_warning_points=30.0, out_of_stock_critical_points=50.0):
+    if str(granularity or "month").lower() != "month": raise ValueError("product dashboard currently supports granularity=month")
+    statement = _build_dashboard_rows_statement(keyword=None, marketplaces=marketplaces, brands=brands, models=models, statuses=statuses, category_names=category_names, buying_options=buying_options, sellers=None, currency=currency, date_from=date_from, date_to=date_to, min_price=min_price, max_price=max_price)
+    statement = _normalized_text_in_values_filter(statement, listing_table.c["condition"], conditions)
+    rows = [dict(row) for row in db.execute(statement.with_only_columns(listing_table.c.id, listing_table.c.research_date, listing_table.c.marketplace, listing_table.c.listing_id, listing_table.c.listing_title, listing_table.c.listing_url, listing_table.c.seller_or_shop, listing_table.c.price, listing_table.c.currency, listing_table.c.quantity, listing_table.c.listing_status, listing_table.c.brand, listing_table.c.model, listing_table.c["condition"], listing_table.c.category, listing_table.c.category_name, listing_table.c.buying_options, listing_table.c.exclude_flag).order_by(listing_table.c.research_date.asc(), listing_table.c.id.asc())).mappings().all()]
+    linked=[]; products={}
+    for row in rows:
+        if not row.get("research_date"): continue
+        product=_pd_identity(row)
+        if not product: continue
+        hay=" ".join(str(product.get(k) or "") for k in ("product_key","product_id","product_label","keyword","brand","model","product_type")).casefold()
+        if keyword and str(keyword).strip().casefold() not in hay: continue
+        products.setdefault(product["product_key"], product); linked.append({"row":row,"product":product})
+    by_product=defaultdict(list)
+    for item in linked: by_product[item["product"]["product_key"]].append(item)
+    classified=[]
+    for key, items in by_product.items():
+        provisional=[]
+        for item in items:
+            c=_pd_classify(item["row"], item["product"])
+            p=_safe_float(item["row"].get("price"))
+            if c["listing_role"]==_PD_ROLE_WHOLE and c["role_confidence"]>=75 and p is not None: provisional.append(p)
+        ref=_median(provisional) if provisional else None
+        for item in items: classified.append({**item,"classification":_pd_classify(item["row"],item["product"],ref)})
+    buckets=defaultdict(list); global_buckets=defaultdict(list)
+    for item in classified:
+        period=item["row"]["research_date"].strftime("%Y-%m"); key=item["product"]["product_key"]
+        buckets[(key,period)].append(item); global_buckets[period].append(item)
+    periods=sorted(global_buckets); internal={}; group_periods=[]
+    for key, product in products.items():
+        prior=set()
+        for period in periods:
+            items=buckets.get((key,period));
+            if not items: continue
+            stats=_pd_finalize(items,currency); sellers=set(stats.pop("seller_names")); new=sorted(sellers-prior,key=str.lower); prior|=sellers
+            stats.update(product); stats.update({"group":key,"period":period,"new_seller_count":len(new),"new_sellers":new[:10]}); internal[(key,period)]={**stats,"seller_names":sellers}; group_periods.append(stats)
+    latest=periods[-1] if periods else None; previous=periods[-2] if len(periods)>1 else None
+    latest_summary=None
+    if latest:
+        latest_summary=_pd_finalize(global_buckets[latest],currency); latest_summary.pop("seller_names",None); latest_summary["period"]=latest
+        latest_summary["product_count"]=sum(1 for key in products if internal.get((key,latest),{}).get("listing_count",0)>0)
+        latest_summary["uncertain_pct"]=round((latest_summary["uncertain_count"]/max(latest_summary["related_listing_count"],1))*100,2)
+    options=[]
+    for key,p in products.items():
+        own=[period for period in periods if (key,period) in internal]; current=internal.get((key,latest),{}) if latest else {}
+        if not current and own: current=internal[(key,own[-1])]
+        options.append({**p,"listing_count":int(current.get("listing_count") or 0),"seller_count":int(current.get("seller_count") or 0),"related_listing_count":int(current.get("related_listing_count") or 0),"excluded_count":int(current.get("excluded_from_market_analytics_count") or 0)})
+    options.sort(key=lambda x:(-x["listing_count"],x["product_label"].lower(),x["product_key"]))
+    alerts=[]; rank={"critical":3,"warning":2,"info":1}
+    for key,p in products.items():
+        cur=internal.get((key,latest)) if latest else None; prev=internal.get((key,previous)) if previous else None
+        if not cur or not cur.get("listing_count"): continue
+        base={"group":key,"product_key":key,"product_label":p["product_label"],"period":latest,"currency":cur.get("currency","USD")}
+        if prev and cur.get("avg_price") is not None and prev.get("avg_price") not in (None,0):
+            drop=((prev["avg_price"]-cur["avg_price"])/prev["avg_price"])*100
+            if drop>=price_drop_warning_pct:
+                sev="critical" if drop>=price_drop_critical_pct else "warning"; alerts.append({**base,"type":"price_drop","severity":sev,"severity_rank":rank[sev],"title":"Giá giảm mạnh","previous_avg_price":prev["avg_price"],"current_avg_price":cur["avg_price"],"change_percent":round(-drop,2),"message":f"Giá TB giảm {drop:.1f}% so với kỳ trước."})
+        hist=[internal[(key,per)].get("min_price") for per in periods if per!=latest and (key,per) in internal and internal[(key,per)].get("min_price") is not None]
+        if cur.get("min_price") is not None and hist and cur["min_price"]<min(hist): alerts.append({**base,"type":"new_low","severity":"warning","severity_rank":2,"title":"Đáy giá mới","current_min_price":cur["min_price"],"previous_floor_price":min(hist),"message":"Giá thấp nhất thấp hơn các kỳ trước."})
+        if prev and cur.get("new_seller_count",0)>0: alerts.append({**base,"type":"new_seller","severity":"info","severity_rank":1,"title":"Người bán mới","new_seller_count":cur["new_seller_count"],"new_sellers":cur["new_sellers"],"message":f"Có {cur['new_seller_count']} người bán mới."})
+        if prev:
+            jump=float(cur.get("out_of_stock_pct") or 0)-float(prev.get("out_of_stock_pct") or 0)
+            if jump>=out_of_stock_warning_points:
+                sev="critical" if jump>=out_of_stock_critical_points else "warning"; alerts.append({**base,"type":"out_of_stock_spike","severity":sev,"severity_rank":rank[sev],"title":"Hết hàng tăng mạnh","previous_out_of_stock_pct":prev.get("out_of_stock_pct",0),"current_out_of_stock_pct":cur.get("out_of_stock_pct",0),"change_points":round(jump,2),"message":f"Tỷ lệ hết hàng tăng {jump:.1f} điểm %."})
+    alerts.sort(key=lambda x:(-x["severity_rank"],str(x.get("product_label") or "").lower()))
+    drilldown=None
+    keys={item["product"]["product_key"] for item in classified}
+    if len(keys)==1 and latest:
+        key=next(iter(keys)); cur=internal.get((key,latest));
+        if cur:
+            current={k:v for k,v in cur.items() if k!="seller_names"}; prev=internal.get((key,previous)); prev_public={k:v for k,v in prev.items() if k!="seller_names"} if prev else None
+            period_items=[item for item in classified if item["product"]["product_key"]==key and item["row"]["research_date"].strftime("%Y-%m")==latest]
+            audit=sorted((_pd_audit(item) for item in period_items),key=lambda x:(x["listing_role"],-x["role_confidence"],str(x.get("listing_title") or "")))
+            drilldown={"product":products[key],"period":latest,"current":current,"previous":prev_public,"role_breakdown":{role:sum(1 for item in period_items if item["classification"]["listing_role"]==role) for role in (_PD_ROLE_WHOLE,_PD_ROLE_COMPONENT,_PD_ROLE_ACCESSORY,_PD_ROLE_DOC,_PD_ROLE_IRRELEVANT,_PD_ROLE_UNCERTAIN)},"related_listings_total":len(audit),"related_listings":audit[:250],"related_listings_truncated":len(audit)>250}
+    return {"version":"v5-product-analytics","group_by":"product","granularity":"month","periods":periods,"groups":[p["product_key"] for p in options],"products":options,"latest_period":latest_summary,"previous_period":previous,"group_periods":group_periods,"alerts":alerts,"drilldown":drilldown,"meta":{"source_table":"public.marketplace_research_results","classifier_version":"hqa-dashboard-role-v1","market_analytics_scope":"whole_product eligible only","raw_rows_examined":len(rows),"linked_rows":len(linked)}}
+
+
+_fetch_hqa_dashboard_analysis_legacy = fetch_hqa_dashboard_analysis
+
+
+def fetch_hqa_dashboard_analysis(*args, **kwargs):
+    if str(kwargs.get("group_by") or "model").strip().lower() == "product":
+        return _fetch_hqa_dashboard_analysis_product(*args, **kwargs)
+    return _fetch_hqa_dashboard_analysis_legacy(*args, **kwargs)
+# --- end HQA Dashboard Product Analytics v5 ---
