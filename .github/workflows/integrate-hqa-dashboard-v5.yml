@@ -29,13 +29,21 @@ jobs:
           test = root / 'apps/portal-web/tests/hqa-dashboard-render.test.js'
           index = root / 'apps/portal-web/index.html'
 
+          def decode_payload(value):
+              return zlib.decompress(base64.b64decode(value)).decode('utf-8')
+
           def unpack(name):
-              return zlib.decompress(base64.b64decode((tmp / name).read_text().strip())).decode('utf-8')
+              return decode_payload((tmp / name).read_text().strip())
+
+          frontend_b64 = ''.join((tmp / f'frontend.part{i}').read_text().strip() for i in range(1, 6))
+          if len(frontend_b64) != 11620:
+              raise RuntimeError(f'Unexpected frontend payload length: {len(frontend_b64)}')
+          frontend = decode_payload(frontend_b64)
 
           app_text = app.read_text(encoding='utf-8')
           marker = '// --- HQA Dashboard Product Analytics v5 (integrated) ---'
           if marker not in app_text:
-              addon = unpack('frontend.zb64').rstrip()
+              addon = frontend.rstrip()
               needle = '\nbootstrap();'
               if needle not in app_text:
                   raise RuntimeError('bootstrap() marker not found in app.js')
@@ -55,12 +63,11 @@ jobs:
           test.write_text(unpack('dashboard-test.zb64'), encoding='utf-8')
 
           index_text = index.read_text(encoding='utf-8')
-          index_text = re.sub(r'styles\\.css\\?v=[^"\']+', 'styles.css?v=20260814-product-dashboard-v5-integrated', index_text)
-          index_text = re.sub(r'app\\.js\\?v=[^"\']+', 'app.js?v=20260814-product-dashboard-v5-integrated', index_text)
+          index_text = re.sub(r'styles\.css\?v=[^"\']+', 'styles.css?v=20260814-product-dashboard-v5-integrated', index_text)
+          index_text = re.sub(r'app\.js\?v=[^"\']+', 'app.js?v=20260814-product-dashboard-v5-integrated', index_text)
           index.write_text(index_text, encoding='utf-8')
           PY
 
-          # Prompt v5 requires Data Check to remain untouched. Only dashboard files are integrated.
           node --check apps/portal-web/assets/app.js
           python -m py_compile services/hqa-service/app/service.py
           cd apps/portal-web
@@ -68,6 +75,7 @@ jobs:
           npm test
           cd ../..
 
+          # Remove staging artifacts. Prompt v5 keeps Data Check unchanged.
           rm -rf .tmp-dashboard-v5
           rm -f .github/workflows/integrate-hqa-dashboard-v5.yml
 
