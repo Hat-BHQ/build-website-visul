@@ -617,8 +617,8 @@ const DASHBOARD_CONFIG = {
   productSeriesMax: 10,
   productPageSize: 30,
   productSeriesDefault: 4,
-  colors: ['#2F6BE4', '#7C5CFC', '#16A34A', '#F59E0B', '#475569', '#EF4444', '#0891B2', '#C026D3', '#0F766E', '#C2410C'],
-  dashPatterns: [[], [7, 4], [2, 3], [9, 3, 2, 3], [12, 4], [4, 3], [10, 2], [2, 2, 8, 2], [6, 2, 2, 2], [14, 4]],
+   colors: ['#2fa2e4', '#7C5CFC', '#16A34A', '#f5be0b', '#475569', '#ef6644', '#0891B2', '#C026D3', '#0F766E', '#c20c0c'],
+   dashPatterns: [[], [7, 4], [2, 3], [9, 3, 2, 3], [12, 4], [4, 3], [10, 2], [2, 2, 8, 2], [6, 2, 2, 2], [14, 4]],
   pointStyles: ['circle', 'rect', 'triangle', 'rectRot', 'star', 'crossRot', 'cross', 'rectRounded', 'dash', 'line'],
 };
 
@@ -718,6 +718,42 @@ function dashboardSeriesStyleForProduct(productKey) {
     hash = (hash * 31 + key.charCodeAt(i)) % 100000;
   }
   return dashboardSeriesStyle(Math.abs(hash));
+}
+
+// Collision-free colour assignment for the CURRENT chart selection. Each selected
+// product is given the lowest free palette slot and keeps it across re-renders;
+// deselecting a product releases its slot for reuse. Because the picker caps the
+// selection at DASHBOARD_CONFIG.productSeriesMax (10) and the palette has 10 colours,
+// no two selected products ever share a colour. Returns Map(product_key -> style).
+function dashboardChartStyleMap() {
+  const dashboard = state.hqa.dashboard;
+  const selected = dashboard.chartProducts || [];
+  const palette = DASHBOARD_CONFIG.colors;
+  const assign = dashboard.chartColorAssign || (dashboard.chartColorAssign = {});
+
+  const selectedSet = new Set(selected);
+  Object.keys(assign).forEach((key) => { if (!selectedSet.has(key)) delete assign[key]; });
+
+  const used = new Set(Object.values(assign));
+  selected.forEach((key) => {
+    if (assign[key] === undefined) {
+      let idx = 0;
+      while (used.has(idx) && idx < palette.length) idx += 1;
+      assign[key] = idx % palette.length;
+      used.add(assign[key]);
+    }
+  });
+
+  const map = new Map();
+  selected.forEach((key) => { map.set(key, dashboardSeriesStyle(assign[key])); });
+  return map;
+}
+
+// Single-product colour: its assigned chart colour if it is in the current chart
+// selection, otherwise a stable per-key colour (used by the drill-down accent).
+function dashboardProductColor(productKey) {
+  const style = dashboardChartStyleMap().get(productKey);
+  return (style || dashboardSeriesStyleForProduct(productKey)).color;
 }
 
 function dashboardProductMap(analysis) {
@@ -966,13 +1002,13 @@ function renderDashboardAuditTable(relatedListings, selectedPeriod, roleFilter) 
   }).join('');
   return `<div class="dashboard-audit-wrap"><table class="dashboard-audit-table">
     <thead><tr><th>Listing title</th><th>Role</th><th>Confidence</th><th>Reason</th><th>Giá</th><th>Condition</th><th>Category</th><th>Eligible</th></tr></thead>
-    <tbody class="dashboard-scroll">${body}</tbody>
+    <tbody>${body}</tbody>
   </table></div>`;
 }
 
-function buildDashboardLegendMarkup(productKeys, productMap) {
+function buildDashboardLegendMarkup(productKeys, productMap, styleMap) {
   return (productKeys || []).map((key) => {
-    const style = dashboardSeriesStyleForProduct(key);
+    const style = (styleMap && styleMap.get(key)) || dashboardSeriesStyleForProduct(key);
     const product = productMap.get(key);
     const label = product ? product.product_label : key;
     const dashed = style.dash && style.dash.length ? 'dashboard-legend-item--dashed' : '';
@@ -990,20 +1026,34 @@ function destroyHqaDashboardCharts() {
 // Render the two comparison charts from the CURRENT chart-product selection only.
 // Missing product/period cells stay null (never coerced to 0). Called on its own when
 // the selection changes so KPIs/alerts/drill-down are not re-fetched or re-rendered.
+// Convert a #RRGGBB hex to an rgba() string (used for the translucent seller bars
+// in the dual-axis combo chart so a product's two bars share one hue).
+function dashboardRgba(hex, alpha) {
+  const clean = String(hex || '').replace('#', '');
+  if (clean.length !== 6) return `rgba(100, 116, 139, ${alpha})`;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function renderDashboardComparisonCharts() {
   destroyHqaDashboardCharts();
   const analysis = state.hqa.dashboard.analysis;
   const priceWrap = document.getElementById('dashboard-price-chart-wrap');
   const sellerWrap = document.getElementById('dashboard-seller-chart-wrap');
+  const comboWrap = document.getElementById('dashboard-combo-chart-wrap');
   if (!analysis || !priceWrap || !sellerWrap) return;
 
   const selected = state.hqa.dashboard.chartProducts || [];
+  const styleMap = dashboardChartStyleMap();
   const emptyMarkup = '<div class="dashboard-empty-chart">Chọn ít nhất 1 sản phẩm để hiển thị biểu đồ.</div>';
   const legendHost = document.getElementById('dashboard-chart-legend-host');
-  if (legendHost) legendHost.innerHTML = buildDashboardLegendMarkup(selected, dashboardProductMap(analysis));
+  if (legendHost) legendHost.innerHTML = buildDashboardLegendMarkup(selected, dashboardProductMap(analysis), styleMap);
   if (!selected.length) {
     priceWrap.innerHTML = emptyMarkup;
     sellerWrap.innerHTML = emptyMarkup;
+    if (comboWrap) comboWrap.innerHTML = emptyMarkup;
     return;
   }
   priceWrap.innerHTML = '<canvas id="dashboard-price-chart" role="img" aria-label="Biểu đồ giá trung bình theo kỳ cho các sản phẩm đã chọn"></canvas>';
@@ -1015,7 +1065,7 @@ function renderDashboardComparisonCharts() {
   const productMap = dashboardProductMap(analysis);
 
   const buildDatasets = (field) => selected.map((key) => {
-    const style = dashboardSeriesStyleForProduct(key);
+    const style = styleMap.get(key) || dashboardSeriesStyleForProduct(key);
     const product = productMap.get(key);
     return {
       label: product ? product.product_label : key,
@@ -1061,6 +1111,73 @@ function renderDashboardComparisonCharts() {
     data: { labels, datasets: buildDatasets('seller_count') },
     options: baseOptions((value) => formatDashboardNumber(value, 0)),
   }));
+
+  // Full-width dual-axis combo (grouped bar): each selected product shows a solid
+  // price bar (left axis) + a translucent seller bar (right axis), same hue per product.
+  if (comboWrap) {
+    comboWrap.innerHTML = '<canvas id="dashboard-combo-chart" role="img" aria-label="Biểu đồ cột đôi giá trung bình và số người bán theo kỳ cho các sản phẩm đã chọn"></canvas>';
+    const comboDatasets = [];
+    selected.forEach((key) => {
+      const style = styleMap.get(key) || dashboardSeriesStyleForProduct(key);
+      const product = productMap.get(key);
+      const label = product ? product.product_label : key;
+      const seriesFor = (field) => labels.map((period) => {
+        const row = map.get(`${key}@@${period}`);
+        const value = row ? Number(row[field]) : NaN;
+        return Number.isFinite(value) ? value : null;
+      });
+      comboDatasets.push({
+        label: `${label} · Giá TB`, metric: 'price', productLabel: label,
+        data: seriesFor('avg_price'), yAxisID: 'yPrice',
+        backgroundColor: style.color, borderColor: style.color, borderWidth: 1,
+        borderRadius: 3, categoryPercentage: 0.86, barPercentage: 0.92,
+      });
+      comboDatasets.push({
+        label: `${label} · Người bán`, metric: 'sellers', productLabel: label,
+        data: seriesFor('seller_count'), yAxisID: 'ySeller',
+        backgroundColor: dashboardRgba(style.color, 0.38), borderColor: dashboardRgba(style.color, 0.75), borderWidth: 1,
+        borderRadius: 3, categoryPercentage: 0.86, barPercentage: 0.92,
+      });
+    });
+    hqaDashboardCharts.push(new Chart(document.getElementById('dashboard-combo-chart'), {
+      type: 'bar',
+      data: { labels, datasets: comboDatasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (context) => {
+                const isPrice = context.dataset.metric === 'price';
+                const value = isPrice
+                  ? formatDashboardCurrency(context.parsed.y, currency)
+                  : `${formatDashboardNumber(context.parsed.y, 0)} người bán`;
+                return `${context.dataset.productLabel} · ${isPrice ? 'Giá TB' : 'Người bán'}: ${value}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: '#64748B', autoSkip: labels.length > 8, maxTicksLimit: 8 } },
+          yPrice: {
+            type: 'linear', position: 'left', beginAtZero: true,
+            title: { display: true, text: 'Giá TB (USD)', color: '#475569', font: { weight: '700' } },
+            grid: { color: '#EDF1F7' }, border: { display: false },
+            ticks: { color: '#64748B', callback: (value) => formatDashboardCurrency(value, currency) },
+          },
+          ySeller: {
+            type: 'linear', position: 'right', beginAtZero: true,
+            title: { display: true, text: 'Số người bán', color: '#475569', font: { weight: '700' } },
+            grid: { drawOnChartArea: false }, border: { display: false },
+            ticks: { color: '#64748B', precision: 0, stepSize: 1 },
+          },
+        },
+      },
+    }));
+  }
 }
 
 // --- Searchable multi-select product picker -------------------------------------
@@ -1362,7 +1479,7 @@ function renderHqaDashboard() {
   const previousPeriod = getDashboardPreviousPeriod(analysis, selectedPeriod);
   const previous = previousPeriod ? getDashboardGroupPeriod(analysis, selectedProduct, previousPeriod) : null;
   const selectedProductRows = (analysis.group_periods || []).filter((item) => item.group === selectedProduct);
-  const selectedColor = dashboardSeriesStyleForProduct(selectedProduct).color;
+  const selectedColor = dashboardProductColor(selectedProduct);
   const currency = current?.currency || latest.currency || 'USD';
   const recommendation = buildDashboardRecommendation(current, previous);
   const priceChange = previous ? dashboardPercentChange(current?.avg_price, previous?.avg_price) : null;
@@ -1452,9 +1569,12 @@ function renderHqaDashboard() {
         <article class="dashboard-chart-panel"><div class="dashboard-chart-heading">Giá trung bình theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-caption">AVG(price) · chỉ whole_product eligible</div><div class="dashboard-chart-wrap" id="dashboard-price-chart-wrap"><canvas id="dashboard-price-chart"></canvas></div></article>
         <article class="dashboard-chart-panel"><div class="dashboard-chart-heading">Số người bán theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-caption">COUNT DISTINCT seller · chỉ whole_product eligible</div><div class="dashboard-chart-wrap" id="dashboard-seller-chart-wrap"><canvas id="dashboard-seller-chart"></canvas></div></article>
       </div>
+      <article class="dashboard-chart-panel dashboard-chart-panel--full">
+        <div class="dashboard-chart-heading">Giá TB &amp; Số người bán theo ${escapeHtml(periodLabel)} — cột đôi (2 trục)</div>
+        <div class="dashboard-chart-caption">Cột đậm = Giá TB (trục trái, USD) · cột nhạt = Số người bán (trục phải). Mỗi sản phẩm 1 cặp cột theo màu.</div>
+        <div class="dashboard-chart-wrap dashboard-chart-wrap--full" id="dashboard-combo-chart-wrap"><canvas id="dashboard-combo-chart"></canvas></div>
+      </article>
     </section>
-
-    <section class="dashboard-panel dashboard-panel--analysis" id="dashboard-analysis-section" tabindex="-1">
       <div class="dashboard-panel-title">Phân tích theo Sản phẩm &amp; thời điểm</div>
       <div class="dashboard-panel-subtext">Drill-down từ market analytics xuống listing thật và classification reason.</div>
       <div class="dashboard-analysis-controls">
