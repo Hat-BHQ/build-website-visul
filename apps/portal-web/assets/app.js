@@ -1575,6 +1575,7 @@ function renderHqaDashboard() {
         <div class="dashboard-chart-wrap dashboard-chart-wrap--full" id="dashboard-combo-chart-wrap"><canvas id="dashboard-combo-chart"></canvas></div>
       </article>
     </section>
+    <section class="dashboard-panel dashboard-panel--analysis" id="dashboard-analysis-section" tabindex="-1">
       <div class="dashboard-panel-title">Phân tích theo Sản phẩm &amp; thời điểm</div>
       <div class="dashboard-panel-subtext">Drill-down từ market analytics xuống listing thật và classification reason.</div>
       <div class="dashboard-analysis-controls">
