@@ -99,10 +99,16 @@ const state = {
         currency: '',
       },
       analysis: null,
-      groupBy: 'model',
       granularity: 'month',
-      selectedModel: '',
+      selectedProduct: '',
       selectedPeriod: '',
+      roleFilter: 'all',
+      // Searchable multi-select product picker that drives BOTH comparison charts.
+      chartProducts: [],
+      chartProductSearch: '',
+      chartProductVisible: 30,
+      chartProductSelectorOpen: false,
+      chartWarn: '',
     },
     dataCheck: {
       hasRun: false,
@@ -222,6 +228,7 @@ let listingsAbortController = null;
 let listingsRequestSequence = 0;
 let allListingsOutsideClickBound = false;
 let allListingsFilterEventsBound = false;
+let dashboardGlobalListenersBound = false;
 
 function getLazyFilterConfigByApiField(apiField) {
   const normalized = String(apiField || '').trim();
@@ -607,6 +614,9 @@ const DASHBOARD_CONFIG = {
   priceDropCriticalPct: 30,
   outOfStockWarningPoints: 30,
   outOfStockCriticalPoints: 50,
+  productSeriesMax: 10,
+  productPageSize: 30,
+  productSeriesDefault: 4,
   colors: ['#2F6BE4', '#7C5CFC', '#16A34A', '#F59E0B', '#475569', '#EF4444', '#0891B2', '#C026D3', '#0F766E', '#C2410C'],
   dashPatterns: [[], [7, 4], [2, 3], [9, 3, 2, 3], [12, 4], [4, 3], [10, 2], [2, 2, 8, 2], [6, 2, 2, 2], [14, 4]],
   pointStyles: ['circle', 'rect', 'triangle', 'rectRot', 'star', 'crossRot', 'cross', 'rectRounded', 'dash', 'line'],
@@ -619,7 +629,6 @@ async function loadHqaDashboardData() {
   state.hqa.dashboard.error = '';
   try {
     const params = buildDashboardCommonParams();
-    params.set('group_by', state.hqa.dashboard.groupBy || DASHBOARD_CONFIG.groupBy);
     params.set('granularity', state.hqa.dashboard.granularity || DASHBOARD_CONFIG.granularity);
     params.set('price_drop_warning_pct', String(DASHBOARD_CONFIG.priceDropWarningPct));
     params.set('price_drop_critical_pct', String(DASHBOARD_CONFIG.priceDropCriticalPct));
@@ -627,21 +636,35 @@ async function loadHqaDashboardData() {
     params.set('out_of_stock_critical_points', String(DASHBOARD_CONFIG.outOfStockCriticalPoints));
     const payload = await api(`/hqa/dashboard/analysis?${params.toString()}`);
     state.hqa.dashboard.analysis = payload;
-
-    const groups = payload.groups || [];
-    const periods = payload.periods || [];
-    if (!groups.includes(state.hqa.dashboard.selectedModel)) {
-      state.hqa.dashboard.selectedModel = groups[0] || '';
-    }
-    if (!periods.includes(state.hqa.dashboard.selectedPeriod)) {
-      state.hqa.dashboard.selectedPeriod = payload.latest_period?.period || periods[periods.length - 1] || '';
-    }
+    reconcileDashboardSelection(payload);
   } catch (error) {
     state.hqa.dashboard.error = error.message || 'Could not load dashboard analytics.';
     state.hqa.dashboard.analysis = null;
   } finally {
     state.hqa.dashboard.loading = false;
   }
+}
+
+// Keep the drill-down + chart selection valid across (re)loads. Drops products that no
+// longer exist and falls back to the top-N whole-product products when empty.
+function reconcileDashboardSelection(payload) {
+  const dashboard = state.hqa.dashboard;
+  const products = payload?.groups || [];
+  const periods = payload?.periods || [];
+  const productSet = new Set(products);
+
+  if (!productSet.has(dashboard.selectedProduct)) {
+    dashboard.selectedProduct = products[0] || '';
+  }
+  if (!periods.includes(dashboard.selectedPeriod)) {
+    dashboard.selectedPeriod = payload?.latest_period?.period || periods[periods.length - 1] || '';
+  }
+
+  dashboard.chartProducts = (dashboard.chartProducts || []).filter((key) => productSet.has(key));
+  if (!dashboard.chartProducts.length) {
+    dashboard.chartProducts = products.slice(0, DASHBOARD_CONFIG.productSeriesDefault);
+  }
+  dashboard.chartProducts = dashboard.chartProducts.slice(0, DASHBOARD_CONFIG.productSeriesMax);
 }
 
 function formatDashboardCurrency(value, currency = DASHBOARD_CONFIG.defaultCurrency) {
@@ -684,6 +707,27 @@ function dashboardSeriesStyle(index) {
     dash: DASHBOARD_CONFIG.dashPatterns[index % DASHBOARD_CONFIG.dashPatterns.length],
     pointStyle: DASHBOARD_CONFIG.pointStyles[index % DASHBOARD_CONFIG.pointStyles.length],
   };
+}
+
+// Stable style keyed by product_key (NOT array index) so a product keeps the same
+// colour / dash / point across both charts and after deselect + reselect.
+function dashboardSeriesStyleForProduct(productKey) {
+  const key = String(productKey || '');
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) % 100000;
+  }
+  return dashboardSeriesStyle(Math.abs(hash));
+}
+
+function dashboardProductMap(analysis) {
+  const map = new Map();
+  (analysis?.products || []).forEach((product) => map.set(product.product_key, product));
+  return map;
+}
+
+function getDashboardProduct(analysis, productKey) {
+  return dashboardProductMap(analysis).get(productKey) || null;
 }
 
 function dashboardGroupPeriodMap(analysis) {
@@ -817,27 +861,122 @@ function renderDashboardTopSellers(items, color, currency, totalSellers) {
 }
 
 function renderDashboardAlerts(alerts) {
-  if (!alerts?.length) return '<div class="empty-state">Không phát hiện bất thường đáng kể ở kỳ mới nhất.</div>';
+  if (!alerts?.length) return '<div class="empty-state">Không phát hiện bất thường whole-product ở kỳ mới nhất.</div>';
   const meta = {
-    critical: { label: 'Nghiêm trọng', color: '#DC2626', bg: '#FEECEC', icon: '!' },
-    warning: { label: 'Đáng chú ý', color: '#C2610C', bg: '#FEF3E2', icon: '!' },
-    info: { label: 'Theo dõi', color: '#B0850A', bg: '#FEF9E7', icon: 'i' },
+    critical: { label: 'NGHIÊM TRỌNG', color: '#DC2626' },
+    warning: { label: 'CẦN THEO DÕI', color: '#D97706' },
+    info: { label: 'GHI NHẬN', color: '#2563EB' },
   };
   return `<div class="dashboard-alert-list dashboard-scroll">${alerts.map((alert) => {
     const severity = meta[String(alert.severity || 'info').toLowerCase()] || meta.info;
+    const currency = alert.currency || 'USD';
+    let metric = escapeHtml(alert.title || 'Cảnh báo');
     let detail = alert.message || '';
-    if (alert.type === 'price_drop') detail = `Giá TB ${formatDashboardCurrency(alert.previous_avg_price, alert.currency || 'USD')} → ${formatDashboardCurrency(alert.current_avg_price, alert.currency || 'USD')} (${Number(alert.change_percent || 0).toFixed(1)}%).`;
-    if (alert.type === 'new_low') detail = `Thấp nhất ${formatDashboardCurrency(alert.current_min_price, alert.currency || 'USD')} · dưới đáy cũ ${formatDashboardCurrency(alert.previous_floor_price, alert.currency || 'USD')}.`;
-    if (alert.type === 'new_seller') detail = `${formatRecordCount(alert.new_seller_count || 0)} mới: ${(alert.new_sellers || []).slice(0, 4).map(escapeHtml).join(', ')}${Number(alert.new_seller_count || 0) > 4 ? '…' : ''}`;
-    if (alert.type === 'out_of_stock_spike') detail = `Hết hàng ${Number(alert.previous_out_of_stock_pct || 0).toFixed(0)}% → ${Number(alert.current_out_of_stock_pct || 0).toFixed(0)}% (+${Number(alert.change_points || 0).toFixed(0)}đ%).`;
-    return `<div class="dashboard-alert-item"><div class="dashboard-alert-icon" style="background:${severity.bg};color:${severity.color}">${severity.icon}</div><div class="dashboard-alert-copy"><strong>${escapeHtml(alert.title || 'Cảnh báo')}</strong><span>${escapeHtml(alert.group || '')}</span><small>${detail}</small></div><span class="dashboard-alert-severity" style="background:${severity.bg};color:${severity.color}">${severity.label}</span></div>`;
+    if (alert.type === 'price_drop') {
+      metric = `Giá TB ▼ ${Math.abs(Number(alert.change_percent || 0)).toFixed(1)}%`;
+      detail = `${formatDashboardCurrency(alert.previous_avg_price, currency)} → ${formatDashboardCurrency(alert.current_avg_price, currency)} · ${formatRecordCount(alert.whole_product_count || 0)} whole-product listing`;
+    } else if (alert.type === 'new_low') {
+      metric = `Đáy giá mới ${formatDashboardCurrency(alert.current_min_price, currency)}`;
+      detail = `Dưới đáy cũ ${formatDashboardCurrency(alert.previous_floor_price, currency)} · không tính parts`;
+    } else if (alert.type === 'new_seller') {
+      metric = `Seller ↑ ${formatRecordCount(alert.new_seller_count || 0)}`;
+      detail = `${(alert.new_sellers || []).slice(0, 3).map(escapeHtml).join(', ')}${Number(alert.new_seller_count || 0) > 3 ? '…' : ''} · whole-product sellers`;
+    } else if (alert.type === 'out_of_stock_spike') {
+      metric = `Hết hàng ▲ ${Number(alert.change_points || 0).toFixed(0)}đ%`;
+      detail = `${Number(alert.previous_out_of_stock_pct || 0).toFixed(0)}% → ${Number(alert.current_out_of_stock_pct || 0).toFixed(0)}% whole-product listing`;
+    }
+    return `<button type="button" class="dashboard-alert-card" data-dashboard-alert-product="${escapeHtml(alert.product_key || alert.group || '')}" data-dashboard-alert-period="${escapeHtml(alert.period || '')}">
+      <span class="dashboard-alert-sev" style="color:${severity.color}">● ${severity.label}</span>
+      <span class="dashboard-alert-title">${escapeHtml(alert.product_label || alert.group || 'Sản phẩm')}</span>
+      <span class="dashboard-alert-metric" style="color:${severity.color}">${escapeHtml(metric)}</span>
+      <span class="dashboard-alert-detail">${escapeHtml(detail)}</span>
+      <span class="dashboard-alert-cta">Xem phân tích →</span>
+    </button>`;
   }).join('')}</div>`;
 }
 
-function buildDashboardLegendMarkup(groups) {
-  return (groups || []).map((group, index) => {
-    const style = dashboardSeriesStyle(index);
-    return `<span class="dashboard-legend-item"><i style="background:${style.color}"></i>${escapeHtml(group)}</span>`;
+// Role-breakdown chips + audit table for the drill-down section.
+const DASHBOARD_ROLE_LABELS = {
+  whole_product: 'Sản phẩm hoàn chỉnh',
+  component: 'Linh kiện',
+  accessory: 'Phụ kiện',
+  documentation: 'Tài liệu',
+  irrelevant: 'Không liên quan',
+  uncertain: 'Chưa chắc chắn',
+};
+const DASHBOARD_ROLE_BADGE = {
+  whole_product: 'dashboard-role-badge--whole',
+  component_part: 'dashboard-role-badge--part',
+  accessory: 'dashboard-role-badge--accessory',
+  documentation_media: 'dashboard-role-badge--doc',
+  irrelevant: 'dashboard-role-badge--irrelevant',
+  uncertain: 'dashboard-role-badge--uncertain',
+};
+// Map audit-table role filter -> which listing_role values it matches.
+const DASHBOARD_ROLE_FILTERS = {
+  all: null,
+  whole_product: ['whole_product'],
+  component: ['component_part'],
+  accessory: ['accessory'],
+  other: ['documentation_media', 'irrelevant'],
+  uncertain: ['uncertain'],
+};
+
+function renderDashboardRoleBreakdown(roleCounts, activeFilter) {
+  const counts = roleCounts || {};
+  // key -> which role-filter it activates when clicked
+  const cards = [
+    { key: 'whole_product', filter: 'whole_product' },
+    { key: 'component', filter: 'component' },
+    { key: 'accessory', filter: 'accessory' },
+    { key: 'documentation', filter: 'other' },
+    { key: 'irrelevant', filter: 'other' },
+    { key: 'uncertain', filter: 'uncertain' },
+  ];
+  return `<div class="dashboard-role-grid">${cards.map((card) => {
+    const active = activeFilter === card.filter && activeFilter !== 'all';
+    return `<button type="button" class="dashboard-role-card ${active ? 'dashboard-role-card--active' : ''}" data-dashboard-role-filter="${card.filter}"><small>${escapeHtml(DASHBOARD_ROLE_LABELS[card.key])}</small><strong>${formatRecordCount(counts[card.key] || 0)}</strong></button>`;
+  }).join('')}</div>`;
+}
+
+function renderDashboardAuditTable(relatedListings, selectedPeriod, roleFilter) {
+  const rolesWanted = DASHBOARD_ROLE_FILTERS[roleFilter] || null;
+  const rows = (relatedListings || [])
+    .filter((item) => item.period === selectedPeriod)
+    .filter((item) => !rolesWanted || rolesWanted.includes(item.role));
+  if (!rows.length) {
+    return '<div class="empty-state">Không có listing liên quan cho bộ lọc/kỳ đã chọn.</div>';
+  }
+  const body = rows.map((item) => {
+    const badgeClass = DASHBOARD_ROLE_BADGE[item.role] || 'dashboard-role-badge--uncertain';
+    const eligible = item.eligible ? '✓' : (item.role === 'uncertain' ? '✕ review' : '✕');
+    const titleCell = item.url
+      ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title || '-')}</a>`
+      : escapeHtml(item.title || '-');
+    return `<tr>
+      <td class="dashboard-audit-title">${titleCell}</td>
+      <td><span class="dashboard-role-badge ${badgeClass}">${escapeHtml(item.role)}</span></td>
+      <td>${Number.isFinite(Number(item.role_confidence)) ? `${Math.round(Number(item.role_confidence))}%` : '—'}</td>
+      <td class="dashboard-audit-reason">${escapeHtml(item.reason || '')}</td>
+      <td class="dashboard-num">${item.price === null || item.price === undefined ? '—' : formatDashboardCurrency(item.price, item.currency || 'USD')}</td>
+      <td>${escapeHtml(item.condition || '—')}</td>
+      <td>${escapeHtml(item.category || '—')}</td>
+      <td>${eligible}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="dashboard-audit-wrap"><table class="dashboard-audit-table">
+    <thead><tr><th>Listing title</th><th>Role</th><th>Confidence</th><th>Reason</th><th>Giá</th><th>Condition</th><th>Category</th><th>Eligible</th></tr></thead>
+    <tbody class="dashboard-scroll">${body}</tbody>
+  </table></div>`;
+}
+
+function buildDashboardLegendMarkup(productKeys, productMap) {
+  return (productKeys || []).map((key) => {
+    const style = dashboardSeriesStyleForProduct(key);
+    const product = productMap.get(key);
+    const label = product ? product.product_label : key;
+    const dashed = style.dash && style.dash.length ? 'dashboard-legend-item--dashed' : '';
+    return `<span class="dashboard-legend-item ${dashed}"><i style="background:${style.color}"></i>${escapeHtml(label)}</span>`;
   }).join('');
 }
 
@@ -848,35 +987,40 @@ function destroyHqaDashboardCharts() {
   hqaDashboardCharts = [];
 }
 
-function renderDashboardCharts(analysis) {
-  if (typeof Chart === 'undefined' || !analysis?.periods?.length || !analysis?.groups?.length) return;
-  const map = dashboardGroupPeriodMap(analysis);
-  const labels = analysis.periods;
-  const groups = analysis.groups;
-  const baseOptions = (formatter) => ({
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        callbacks: {
-          label: (context) => `${context.dataset.label}: ${formatter(context.parsed.y)}`,
-        },
-      },
-    },
-    scales: {
-      x: { grid: { display: false }, ticks: { color: '#64748B', autoSkip: labels.length > 8, maxTicksLimit: 8 } },
-      y: { grid: { color: '#EDF1F7' }, border: { display: false }, ticks: { color: '#64748B', callback: formatter } },
-    },
-  });
+// Render the two comparison charts from the CURRENT chart-product selection only.
+// Missing product/period cells stay null (never coerced to 0). Called on its own when
+// the selection changes so KPIs/alerts/drill-down are not re-fetched or re-rendered.
+function renderDashboardComparisonCharts() {
+  destroyHqaDashboardCharts();
+  const analysis = state.hqa.dashboard.analysis;
+  const priceWrap = document.getElementById('dashboard-price-chart-wrap');
+  const sellerWrap = document.getElementById('dashboard-seller-chart-wrap');
+  if (!analysis || !priceWrap || !sellerWrap) return;
 
-  const buildDatasets = (field) => groups.map((group, index) => {
-    const style = dashboardSeriesStyle(index);
+  const selected = state.hqa.dashboard.chartProducts || [];
+  const emptyMarkup = '<div class="dashboard-empty-chart">Chọn ít nhất 1 sản phẩm để hiển thị biểu đồ.</div>';
+  const legendHost = document.getElementById('dashboard-chart-legend-host');
+  if (legendHost) legendHost.innerHTML = buildDashboardLegendMarkup(selected, dashboardProductMap(analysis));
+  if (!selected.length) {
+    priceWrap.innerHTML = emptyMarkup;
+    sellerWrap.innerHTML = emptyMarkup;
+    return;
+  }
+  priceWrap.innerHTML = '<canvas id="dashboard-price-chart" role="img" aria-label="Biểu đồ giá trung bình theo kỳ cho các sản phẩm đã chọn"></canvas>';
+  sellerWrap.innerHTML = '<canvas id="dashboard-seller-chart" role="img" aria-label="Biểu đồ số người bán theo kỳ cho các sản phẩm đã chọn"></canvas>';
+
+  if (typeof Chart === 'undefined' || !analysis.periods?.length) return;
+  const labels = analysis.periods;
+  const map = dashboardGroupPeriodMap(analysis);
+  const productMap = dashboardProductMap(analysis);
+
+  const buildDatasets = (field) => selected.map((key) => {
+    const style = dashboardSeriesStyleForProduct(key);
+    const product = productMap.get(key);
     return {
-      label: group,
+      label: product ? product.product_label : key,
       data: labels.map((period) => {
-        const row = map.get(`${group}@@${period}`);
+        const row = map.get(`${key}@@${period}`);
         const value = row ? Number(row[field]) : NaN;
         return Number.isFinite(value) ? value : null;
       }),
@@ -892,24 +1036,124 @@ function renderDashboardCharts(analysis) {
     };
   });
 
-  const priceCanvas = document.getElementById('dashboard-price-chart');
-  if (priceCanvas) {
-    const currency = analysis.latest_period?.currency || 'USD';
-    hqaDashboardCharts.push(new Chart(priceCanvas, {
-      type: 'line',
-      data: { labels, datasets: buildDatasets('avg_price') },
-      options: baseOptions((value) => formatDashboardCurrency(value, currency)),
-    }));
-  }
+  const baseOptions = (formatter) => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${formatter(context.parsed.y)}` } },
+    },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: '#64748B', autoSkip: labels.length > 8, maxTicksLimit: 8 } },
+      y: { grid: { color: '#EDF1F7' }, border: { display: false }, ticks: { color: '#64748B', callback: formatter } },
+    },
+  });
 
-  const sellerCanvas = document.getElementById('dashboard-seller-chart');
-  if (sellerCanvas) {
-    hqaDashboardCharts.push(new Chart(sellerCanvas, {
-      type: 'line',
-      data: { labels, datasets: buildDatasets('seller_count') },
-      options: baseOptions((value) => formatDashboardNumber(value, 0)),
-    }));
+  const currency = analysis.latest_period?.currency || 'USD';
+  hqaDashboardCharts.push(new Chart(document.getElementById('dashboard-price-chart'), {
+    type: 'line',
+    data: { labels, datasets: buildDatasets('avg_price') },
+    options: baseOptions((value) => formatDashboardCurrency(value, currency)),
+  }));
+  hqaDashboardCharts.push(new Chart(document.getElementById('dashboard-seller-chart'), {
+    type: 'line',
+    data: { labels, datasets: buildDatasets('seller_count') },
+    options: baseOptions((value) => formatDashboardNumber(value, 0)),
+  }));
+}
+
+// --- Searchable multi-select product picker -------------------------------------
+function dashboardFilteredProducts() {
+  const analysis = state.hqa.dashboard.analysis;
+  const query = String(state.hqa.dashboard.chartProductSearch || '').trim().toLowerCase();
+  const products = analysis?.products || [];
+  if (!query) return products;
+  return products.filter((product) => {
+    const haystack = `${product.product_label} ${product.brand} ${product.model} ${product.product_type} ${product.product_key}`.toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function buildDashboardProductSelectorMarkup(analysis) {
+  return `
+    <div class="dashboard-ps" id="dashboard-ps">
+      <span class="dashboard-ps-label">Sản phẩm hiển thị trên 2 biểu đồ</span>
+      <button type="button" class="dashboard-ps-trigger" id="dashboard-ps-trigger" aria-expanded="false" aria-haspopup="listbox">
+        <span class="dashboard-ps-chips" id="dashboard-ps-chips"></span>
+        <span class="dashboard-ps-count" id="dashboard-ps-count"></span>
+      </button>
+      <div class="dashboard-ps-pop" id="dashboard-ps-pop" hidden>
+        <div class="dashboard-ps-search"><input type="search" id="dashboard-ps-search" placeholder="Tìm theo tên sản phẩm, brand, model..." aria-label="Tìm sản phẩm" value="${escapeHtml(state.hqa.dashboard.chartProductSearch || '')}"></div>
+        <div class="dashboard-ps-actions"><label><input type="checkbox" id="dashboard-ps-select-loaded"> Chọn tất cả đã tải</label><button type="button" id="dashboard-ps-clear">Clear</button></div>
+        <div class="dashboard-ps-list" id="dashboard-ps-list" role="listbox" aria-multiselectable="true"></div>
+        <div class="dashboard-ps-footer"><button type="button" id="dashboard-ps-load-more">Load more</button></div>
+      </div>
+      <div class="dashboard-ps-warn" id="dashboard-ps-warn"></div>
+    </div>`;
+}
+
+// Update chips / count / list / warn without rebuilding the popup (keeps it open + focused).
+function refreshDashboardSelectorUI() {
+  const analysis = state.hqa.dashboard.analysis;
+  if (!analysis) return;
+  const dashboard = state.hqa.dashboard;
+  const productMap = dashboardProductMap(analysis);
+  const selected = dashboard.chartProducts || [];
+  const max = DASHBOARD_CONFIG.productSeriesMax;
+
+  const chips = document.getElementById('dashboard-ps-chips');
+  if (chips) {
+    const selectedProducts = selected.map((key) => productMap.get(key)).filter(Boolean);
+    const shown = selectedProducts.slice(0, 3);
+    chips.innerHTML = shown.map((product) => `<span class="dashboard-ps-chip"><span>${escapeHtml(product.product_label)}</span></span>`).join('')
+      + (selectedProducts.length > 3 ? `<span class="dashboard-ps-chip dashboard-ps-chip--more">+${selectedProducts.length - 3}</span>` : '')
+      + (selectedProducts.length ? '' : '<span class="dashboard-ps-placeholder">Chọn sản phẩm để so sánh…</span>');
   }
+  const count = document.getElementById('dashboard-ps-count');
+  if (count) count.textContent = `${selected.length}/${max}`;
+  const compareMeta = document.getElementById('dashboard-compare-meta');
+  if (compareMeta) compareMeta.textContent = `Đang so sánh ${selected.length} sản phẩm`;
+
+  const list = document.getElementById('dashboard-ps-list');
+  const filtered = dashboardFilteredProducts();
+  const visibleRows = filtered.slice(0, dashboard.chartProductVisible);
+  if (list) {
+    list.innerHTML = visibleRows.length
+      ? visibleRows.map((product) => {
+        const checked = selected.includes(product.product_key) ? 'checked' : '';
+        const excluded = product.excluded_count ? ` · ${formatRecordCount(product.excluded_count)} excluded` : '';
+        return `<label class="dashboard-ps-row"><input type="checkbox" data-dashboard-ps-id="${escapeHtml(product.product_key)}" ${checked}><span class="dashboard-ps-main"><strong>${escapeHtml(product.product_label)}</strong><small>${escapeHtml([product.brand, product.model, product.product_type].filter(Boolean).join(' · ') || '—')}</small></span><span class="dashboard-ps-meta">${formatRecordCount(product.whole_product_listings)} listing · ${formatRecordCount(product.seller_count)} seller${excluded}</span></label>`;
+      }).join('')
+      : '<div class="dashboard-ps-empty">Không tìm thấy sản phẩm phù hợp.</div>';
+  }
+  const loadMore = document.getElementById('dashboard-ps-load-more');
+  if (loadMore) loadMore.hidden = visibleRows.length >= filtered.length;
+  const selectLoaded = document.getElementById('dashboard-ps-select-loaded');
+  if (selectLoaded) selectLoaded.checked = visibleRows.length > 0 && visibleRows.every((product) => selected.includes(product.product_key));
+  const warn = document.getElementById('dashboard-ps-warn');
+  if (warn) warn.textContent = dashboard.chartWarn || '';
+}
+
+function toggleDashboardProduct(productKey, checkbox) {
+  const dashboard = state.hqa.dashboard;
+  const max = DASHBOARD_CONFIG.productSeriesMax;
+  const selected = dashboard.chartProducts || [];
+  if (selected.includes(productKey)) {
+    dashboard.chartProducts = selected.filter((key) => key !== productKey);
+    dashboard.chartWarn = '';
+  } else {
+    if (selected.length >= max) {
+      if (checkbox) checkbox.checked = false;
+      dashboard.chartWarn = `Chỉ có thể hiển thị tối đa ${max} sản phẩm cùng lúc để biểu đồ dễ đọc.`;
+      refreshDashboardSelectorUI();
+      return;
+    }
+    dashboard.chartProducts = [...selected, productKey];
+    dashboard.chartWarn = '';
+  }
+  refreshDashboardSelectorUI();
+  renderDashboardComparisonCharts();
 }
 
 function dashboardScopeSummary(filters) {
@@ -979,10 +1223,11 @@ function downloadDashboardCsv(dataset) {
       change_points: item.change_points,
     }));
   } else if (dataset === 'top_sellers') {
-    const current = getDashboardGroupPeriod(analysis, state.hqa.dashboard.selectedModel, state.hqa.dashboard.selectedPeriod);
+    const current = getDashboardGroupPeriod(analysis, state.hqa.dashboard.selectedProduct, state.hqa.dashboard.selectedPeriod);
     rows = (current?.top_sellers || []).slice(0, 10).map((item, index) => ({
       rank: index + 1,
-      model: state.hqa.dashboard.selectedModel,
+      product_key: state.hqa.dashboard.selectedProduct,
+      product_label: current?.product_label || '',
       period: state.hqa.dashboard.selectedPeriod,
       seller: item.seller,
       listing_count: item.listing_count,
@@ -990,7 +1235,28 @@ function downloadDashboardCsv(dataset) {
       min_price: item.min_price,
       currency: current?.currency || '',
     }));
-    filename = `hqa_dashboard_top10_${state.hqa.dashboard.groupBy || 'model'}_${state.hqa.dashboard.selectedModel || 'group'}_${state.hqa.dashboard.selectedPeriod || 'period'}.csv`;
+    filename = `hqa_dashboard_top10_${state.hqa.dashboard.selectedProduct || 'product'}_${state.hqa.dashboard.selectedPeriod || 'period'}.csv`;
+  } else if (dataset === 'audit') {
+    const productKey = state.hqa.dashboard.selectedProduct;
+    const related = (analysis.related_listings || {})[productKey] || [];
+    rows = related.map((item) => ({
+      product_key: productKey,
+      period: item.period,
+      listing_id: item.listing_id,
+      listing_title: item.title,
+      listing_role: item.role,
+      role_confidence: item.role_confidence,
+      role_reasons: item.reason,
+      eligible_for_market_analytics: item.eligible,
+      price: item.price,
+      currency: item.currency,
+      condition: item.condition,
+      category: item.category,
+      seller: item.seller,
+      status: item.status,
+      url: item.url,
+    }));
+    filename = `hqa_dashboard_role_audit_${productKey || 'product'}.csv`;
   }
   if (!rows.length) {
     state.hqa.dashboard.error = 'Không có dữ liệu để xuất CSV.';
@@ -1013,6 +1279,56 @@ function downloadDashboardCsv(dataset) {
   URL.revokeObjectURL(url);
 }
 
+function closeDashboardProductSelector() {
+  state.hqa.dashboard.chartProductSelectorOpen = false;
+  const pop = document.getElementById('dashboard-ps-pop');
+  const trigger = document.getElementById('dashboard-ps-trigger');
+  if (pop) pop.hidden = true;
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+// Global (document-level) listeners for the product picker. Bound exactly once so
+// repeated dashboard re-renders never stack duplicate handlers.
+function ensureDashboardGlobalListeners() {
+  if (dashboardGlobalListenersBound) return;
+  dashboardGlobalListenersBound = true;
+  document.addEventListener('click', (event) => {
+    if (!state.hqa.dashboard.chartProductSelectorOpen) return;
+    const selector = document.getElementById('dashboard-ps');
+    if (selector && !selector.contains(event.target)) closeDashboardProductSelector();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.hqa.dashboard.chartProductSelectorOpen) closeDashboardProductSelector();
+  });
+}
+
+// Re-render only the drill-down role chips + audit table (used when a role filter is
+// clicked) so the comparison charts and product selection are left untouched.
+function refreshDashboardDrillAudit() {
+  const data = state.hqa.dashboard;
+  const analysis = data.analysis;
+  if (!analysis) return;
+  const current = getDashboardGroupPeriod(analysis, data.selectedProduct, data.selectedPeriod);
+  const roleGrid = document.getElementById('dashboard-role-grid-host');
+  if (roleGrid) roleGrid.innerHTML = renderDashboardRoleBreakdown(current?.role_counts, data.roleFilter);
+  const auditHost = document.getElementById('dashboard-audit-host');
+  if (auditHost) {
+    const related = (analysis.related_listings || {})[data.selectedProduct] || [];
+    auditHost.innerHTML = renderDashboardAuditTable(related, data.selectedPeriod, data.roleFilter);
+  }
+  bindDashboardRoleCards();
+}
+
+function bindDashboardRoleCards() {
+  document.querySelectorAll('[data-dashboard-role-filter]').forEach((card) => {
+    card.addEventListener('click', () => {
+      const value = card.getAttribute('data-dashboard-role-filter') || 'all';
+      state.hqa.dashboard.roleFilter = (state.hqa.dashboard.roleFilter === value) ? 'all' : value;
+      refreshDashboardDrillAudit();
+    });
+  });
+}
+
 function renderHqaDashboard() {
   const dashboardView = document.getElementById('hqa-dashboard-view');
   if (!dashboardView) return;
@@ -1030,39 +1346,86 @@ function renderHqaDashboard() {
   }
 
   const latest = analysis.latest_period || {};
-  const groups = analysis.groups || [];
+  const products = analysis.groups || [];
   const periods = analysis.periods || [];
-  const selectedModel = groups.includes(data.selectedModel) ? data.selectedModel : (groups[0] || '');
-  const selectedPeriod = periods.includes(data.selectedPeriod) ? data.selectedPeriod : (latest.period || periods[periods.length - 1] || '');
-  state.hqa.dashboard.selectedModel = selectedModel;
-  state.hqa.dashboard.selectedPeriod = selectedPeriod;
+  const granularity = analysis.granularity || data.granularity || 'month';
+  const periodLabel = granularity === 'week' ? 'tuần' : 'tháng';
 
-  const current = getDashboardGroupPeriod(analysis, selectedModel, selectedPeriod);
+  const selectedProduct = products.includes(data.selectedProduct) ? data.selectedProduct : (products[0] || '');
+  const selectedPeriod = periods.includes(data.selectedPeriod) ? data.selectedPeriod : (latest.period || periods[periods.length - 1] || '');
+  data.selectedProduct = selectedProduct;
+  data.selectedPeriod = selectedPeriod;
+  if (!DASHBOARD_ROLE_FILTERS[data.roleFilter]) data.roleFilter = 'all';
+
+  const productInfo = getDashboardProduct(analysis, selectedProduct);
+  const current = getDashboardGroupPeriod(analysis, selectedProduct, selectedPeriod);
   const previousPeriod = getDashboardPreviousPeriod(analysis, selectedPeriod);
-  const previous = previousPeriod ? getDashboardGroupPeriod(analysis, selectedModel, previousPeriod) : null;
-  const selectedGroupRows = (analysis.group_periods || []).filter((item) => item.group === selectedModel);
-  const selectedColor = dashboardSeriesStyle(Math.max(groups.indexOf(selectedModel), 0)).color;
+  const previous = previousPeriod ? getDashboardGroupPeriod(analysis, selectedProduct, previousPeriod) : null;
+  const selectedProductRows = (analysis.group_periods || []).filter((item) => item.group === selectedProduct);
+  const selectedColor = dashboardSeriesStyleForProduct(selectedProduct).color;
   const currency = current?.currency || latest.currency || 'USD';
   const recommendation = buildDashboardRecommendation(current, previous);
   const priceChange = previous ? dashboardPercentChange(current?.avg_price, previous?.avg_price) : null;
-  const groupBy = analysis.group_by || data.groupBy || 'model';
-  const granularity = analysis.granularity || data.granularity || 'month';
-  const groupLabel = groupBy === 'brand' ? 'Brand' : (groupBy === 'category' ? 'Category' : 'Model');
-  const periodLabel = granularity === 'week' ? 'tuần' : 'tháng';
 
+  const wholeCount = Number(latest.whole_product_count ?? latest.listing_count ?? 0);
+  const relatedCount = Number(latest.related_listing_count ?? 0);
   const kpis = [
-    { label: 'Listing phân tích', value: formatRecordCount(latest.listing_count || 0), detail: `Unique IDs ${formatRecordCount(latest.unique_ids || 0)} · ${escapeHtml(latest.period || '—')}`, accent: '#2F6BE4' },
-    { label: 'Số Model', value: formatRecordCount(latest.model_count || 0), detail: 'trong kỳ mới nhất', accent: '#7C5CFC' },
-    { label: 'Người bán', value: formatRecordCount(latest.seller_count || 0), detail: 'distinct seller', accent: '#16A34A' },
-    { label: 'Giá trung vị', value: formatDashboardCurrency(latest.median_price, latest.currency || 'USD'), detail: 'toàn bộ listing có giá', accent: '#475569' },
-    { label: 'Hết hàng', value: formatRecordCount(latest.out_of_stock_count || 0), detail: `${Number(latest.out_of_stock_pct || 0).toFixed(1)}% listing`, accent: '#F59E0B', valueColor: '#EF4444' },
+    { label: 'Listing phân tích', value: formatRecordCount(wholeCount), detail: `${formatRecordCount(wholeCount)} whole-product / ${formatRecordCount(relatedCount)} liên quan`, accent: '#2F6BE4' },
+    { label: 'Sản phẩm', value: formatRecordCount(latest.product_count || 0), detail: 'sản phẩm có dữ liệu hợp lệ', accent: '#7C5CFC' },
+    { label: 'Người bán', value: formatRecordCount(latest.seller_count || 0), detail: 'whole-product sellers', accent: '#16A34A' },
+    { label: 'Giá trung vị', value: formatDashboardCurrency(latest.median_price, latest.currency || 'USD'), detail: 'không tính parts/accessories', accent: '#475569' },
+    { label: 'Hết hàng', value: formatRecordCount(latest.out_of_stock_count || 0), detail: `${Number(latest.out_of_stock_pct || 0).toFixed(1)}% whole-product listing`, accent: '#F59E0B', valueColor: '#EF4444' },
   ];
+
+  const productLabel = productInfo?.product_label || selectedProduct || 'Sản phẩm';
+  const identityBits = productInfo ? [productInfo.brand && `brand ${productInfo.brand}`, productInfo.model && `model ${productInfo.model}`, productInfo.product_type].filter(Boolean) : [];
+
+  // Drill-down body depends on how much whole-product data the period has (spec §25).
+  let drillBody = '';
+  if (!current || Number(current.related_listing_count || 0) === 0) {
+    drillBody = '<div class="empty-state">Sản phẩm không có listing liên quan trong kỳ đã chọn.</div>';
+  } else {
+    const excluded = Number(current.excluded_from_market_analytics_count || 0);
+    const uncertainCount = Number(current.role_counts?.uncertain || 0);
+    const relatedForPeriod = Number(current.related_listing_count || 0);
+    const uncertainWarn = relatedForPeriod > 0 && (uncertainCount / relatedForPeriod) >= 0.2
+      ? `<div class="dashboard-summary-note dashboard-summary-note--warn">${((uncertainCount / relatedForPeriod) * 100).toFixed(0)}% listing chưa phân loại chắc chắn; market analytics đang loại các listing này.</div>`
+      : '';
+    const hasWhole = Number(current.whole_product_count || 0) > 0;
+    const analyticsBody = hasWhole ? `
+        <div class="dashboard-stats-grid">
+          <div class="dashboard-stat"><small>Listing hợp lệ</small><strong>${formatRecordCount(current.whole_product_count || 0)}</strong></div>
+          <div class="dashboard-stat"><small>Listing liên quan</small><strong>${formatRecordCount(current.related_listing_count || 0)}</strong></div>
+          <div class="dashboard-stat"><small>Người bán</small><strong>${formatRecordCount(current.seller_count || 0)}</strong><em>${renderDashboardDelta(current.seller_count, previous?.seller_count, 'number')}</em></div>
+          <div class="dashboard-stat"><small>Thấp nhất</small><strong>${formatDashboardCurrency(current.min_price, currency)}</strong><em>${renderDashboardDelta(current.min_price, previous?.min_price, 'currency', currency)}</em></div>
+          <div class="dashboard-stat"><small>Trung vị</small><strong>${formatDashboardCurrency(current.median_price, currency)}</strong><em>${renderDashboardDelta(current.median_price, previous?.median_price, 'currency', currency)}</em></div>
+          <div class="dashboard-stat"><small>Giá TB</small><strong>${formatDashboardCurrency(current.avg_price, currency)}</strong><em>${renderDashboardDelta(current.avg_price, previous?.avg_price, 'currency', currency)}</em></div>
+          <div class="dashboard-stat"><small>% hết hàng</small><strong>${Number(current.out_of_stock_pct || 0).toFixed(0)}%</strong><em>${renderDashboardDelta(current.out_of_stock_pct, previous?.out_of_stock_pct, 'points', currency, true)}</em></div>
+        </div>
+        <div class="dashboard-range-panel"><div class="dashboard-section-label">Dải giá thị trường — chỉ whole product</div><div class="dashboard-range-caption">Vùng tô đậm = 50% listing ở giữa (P25–P75); vạch = trung vị; chấm = giá TB.</div>${renderDashboardRangeSvg(current, selectedColor, currency)}</div>
+        <div class="dashboard-spark-grid">
+          <div class="dashboard-spark-panel"><div class="dashboard-section-label">Xu hướng giá TB 6 kỳ</div><div class="dashboard-trend-caption">Chỉ whole-product eligible listings · kỳ đang chọn được highlight.</div>${renderDashboardSparkline(selectedProductRows, selectedPeriod, selectedColor)}<div class="dashboard-trend-text">${priceChange === null ? 'Chưa có kỳ trước để so sánh.' : `So kỳ trước: giá TB ${priceChange > 1 ? 'tăng' : (priceChange < -1 ? 'giảm' : 'đi ngang')} ${Math.abs(priceChange).toFixed(1)}%; người bán ${previous ? `${Number(current.seller_count || 0) - Number(previous.seller_count || 0) >= 0 ? '+' : ''}${Number(current.seller_count || 0) - Number(previous.seller_count || 0)}` : '—'}; CV ${Number(current.cv || 0).toFixed(0)}%.`}</div></div>
+          <div class="dashboard-spark-panel"><div class="dashboard-section-label">Gợi ý giá niêm yết</div>${recommendation ? `<div class="dashboard-suggestion-list">${recommendation.items.map((item) => `<div class="dashboard-suggestion ${item.label === recommendation.recommended ? 'dashboard-suggestion--active' : ''}"><span class="dashboard-suggestion-dot" style="background:${item.color}"></span><span class="dashboard-suggestion-copy"><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.note)}</small></span><strong>${formatDashboardCurrency(item.value, currency)}</strong></div>`).join('')}</div>` : '<div class="empty-state">Không đủ dữ liệu giá để tạo gợi ý.</div>'}</div>
+        </div>
+        ${recommendation ? `<div class="dashboard-note">${escapeHtml(recommendation.reason)}</div>` : ''}
+        <div class="dashboard-top-sellers-panel"><div class="dashboard-section-label">Top 10 người bán — chỉ whole product</div>${renderDashboardTopSellers(current.top_sellers || [], selectedColor, currency, current.seller_count)}</div>
+      ` : `<div class="dashboard-summary-note dashboard-summary-note--warn">Có ${formatRecordCount(current.related_listing_count || 0)} listing liên quan nhưng chưa có listing sản phẩm hoàn chỉnh đủ điều kiện phân tích giá trong kỳ này.</div>`;
+
+    drillBody = `
+      <div class="dashboard-product-line"><b style="color:${selectedColor}">${escapeHtml(productLabel)}</b>${identityBits.length ? ` · ${escapeHtml(identityBits.join(' · '))}` : ''} · CV ${Number(current.cv || 0).toFixed(0)}%</div>
+      <div class="dashboard-summary-note">${formatRecordCount(current.related_listing_count || 0)} listing liên quan · <b>${formatRecordCount(current.whole_product_count || 0)} listing sản phẩm hoàn chỉnh dùng cho market analytics</b> · ${formatRecordCount(excluded)} listing parts/accessories/docs/uncertain đã loại khỏi giá và seller trend.</div>
+      ${uncertainWarn}
+      <div class="dashboard-section-label">Phân loại listing liên quan</div>
+      <div id="dashboard-role-grid-host">${renderDashboardRoleBreakdown(current.role_counts, data.roleFilter)}</div>
+      ${analyticsBody}
+      <div class="dashboard-audit-panel"><div class="dashboard-section-label-row"><span class="dashboard-section-label">Listings liên quan — classification audit</span><button type="button" class="dashboard-audit-export" data-dashboard-export="audit">Xuất role audit CSV</button></div><div class="dashboard-audit-sub">Bảng giúp Marketing thấy vì sao listing được tính hoặc bị loại.</div><div id="dashboard-audit-host">${renderDashboardAuditTable((analysis.related_listings || {})[selectedProduct] || [], selectedPeriod, data.roleFilter)}</div></div>
+    `;
+  }
 
   dashboardView.innerHTML = `
     <div class="dashboard-action-row">
-      <div class="dashboard-scope-copy"><strong>Phạm vi Dashboard</strong><span>${escapeHtml(dashboardScopeSummary(data.appliedFilters))}</span></div>
+      <div class="dashboard-scope-copy"><strong>Marketing Dashboard</strong><span>main analytics chỉ dùng whole-product listings · ${escapeHtml(dashboardScopeSummary(data.appliedFilters))}</span></div>
       <div class="dashboard-view-controls" aria-label="Tùy chọn phân tích Dashboard">
-        <label><span>Nhóm</span><select id="dashboard-group-by"><option value="model" ${groupBy === 'model' ? 'selected' : ''}>Model</option><option value="brand" ${groupBy === 'brand' ? 'selected' : ''}>Brand</option><option value="category" ${groupBy === 'category' ? 'selected' : ''}>Category</option></select></label>
         <label><span>Kỳ</span><select id="dashboard-granularity"><option value="month" ${granularity === 'month' ? 'selected' : ''}>Tháng</option><option value="week" ${granularity === 'week' ? 'selected' : ''}>Tuần</option></select></label>
       </div>
       <div class="dashboard-export-actions" aria-label="Xuất dữ liệu Dashboard">
@@ -1072,57 +1435,37 @@ function renderHqaDashboard() {
       </div>
     </div>
     ${data.error ? `<div class="error">${escapeHtml(data.error)}</div>` : ''}
-    <div class="dashboard-kpi-grid">${kpis.map((item) => `<article class="dashboard-kpi-card" style="border-top-color:${item.accent}"><div class="dashboard-kpi-label">${escapeHtml(item.label)}</div><div class="dashboard-kpi-value" style="color:${item.valueColor || item.accent}">${escapeHtml(item.value)}</div><div class="dashboard-kpi-detail">${item.detail}</div></article>`).join('')}</div>
+    <div class="dashboard-kpi-grid">${kpis.map((item) => `<article class="dashboard-kpi-card" style="border-top-color:${item.accent}"><div class="dashboard-kpi-label">${escapeHtml(item.label)}</div><div class="dashboard-kpi-value" style="color:${item.valueColor || item.accent}">${escapeHtml(item.value)}</div><div class="dashboard-kpi-detail">${escapeHtml(item.detail)}</div></article>`).join('')}</div>
 
     <section class="dashboard-panel dashboard-panel--alert">
       <div class="dashboard-panel-heading"><div class="dashboard-panel-title-wrap"><span class="dashboard-alert-dot" aria-hidden="true"></span><span class="dashboard-panel-title">Cảnh báo bất thường</span></div><span class="dashboard-panel-meta">${formatRecordCount((analysis.alerts || []).length)} cảnh báo</span></div>
-      <div class="dashboard-panel-subtext">So kỳ gần nhất với kỳ liền trước · theo từng ${escapeHtml(groupLabel)}</div>
+      <div class="dashboard-panel-subtext">Cảnh báo theo Sản phẩm × kỳ · chạy trên whole-product analytics · click card để xem drill-down.</div>
       ${renderDashboardAlerts(analysis.alerts || [])}
     </section>
 
-    <div class="dashboard-chart-grid">
-      <article class="dashboard-panel dashboard-chart-panel"><div class="dashboard-chart-heading">Giá trung bình theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-legend">${buildDashboardLegendMarkup(groups)}</div><div class="dashboard-chart-wrap"><canvas id="dashboard-price-chart" role="img" aria-label="Biểu đồ đường giá trung bình theo ${escapeHtml(periodLabel)} cho các ${escapeHtml(groupLabel)}">Giá trung bình theo ${escapeHtml(periodLabel)}.</canvas></div></article>
-      <article class="dashboard-panel dashboard-chart-panel"><div class="dashboard-chart-heading">Số người bán theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-legend">${buildDashboardLegendMarkup(groups)}</div><div class="dashboard-chart-wrap"><canvas id="dashboard-seller-chart" role="img" aria-label="Biểu đồ đường số người bán theo ${escapeHtml(periodLabel)} cho các ${escapeHtml(groupLabel)}">Số người bán theo ${escapeHtml(periodLabel)}.</canvas></div></article>
-    </div>
+    <section class="dashboard-panel">
+      <div class="dashboard-panel-heading"><div class="dashboard-panel-title-wrap"><span class="dashboard-panel-title">Xu hướng thị trường theo sản phẩm</span></div><span class="dashboard-panel-meta" id="dashboard-compare-meta"></span></div>
+      <div class="dashboard-panel-subtext">Nguồn là listing thật; chart chỉ hiển thị Sản phẩm đã chọn để tránh rối khi dữ liệu lớn.</div>
+      <div class="dashboard-chart-head-row">${buildDashboardProductSelectorMarkup(analysis)}</div>
+      <div class="dashboard-chart-legend" id="dashboard-chart-legend-host" aria-hidden="true"></div>
+      <div class="dashboard-chart-grid">
+        <article class="dashboard-chart-panel"><div class="dashboard-chart-heading">Giá trung bình theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-caption">AVG(price) · chỉ whole_product eligible</div><div class="dashboard-chart-wrap" id="dashboard-price-chart-wrap"><canvas id="dashboard-price-chart"></canvas></div></article>
+        <article class="dashboard-chart-panel"><div class="dashboard-chart-heading">Số người bán theo ${escapeHtml(periodLabel)}</div><div class="dashboard-chart-caption">COUNT DISTINCT seller · chỉ whole_product eligible</div><div class="dashboard-chart-wrap" id="dashboard-seller-chart-wrap"><canvas id="dashboard-seller-chart"></canvas></div></article>
+      </div>
+    </section>
 
-    <section class="dashboard-panel dashboard-panel--analysis">
-      <div class="dashboard-panel-title">Phân tích theo ${escapeHtml(groupLabel)} &amp; thời điểm</div>
-      <div class="dashboard-panel-subtext">Chọn ${escapeHtml(groupLabel)} và kỳ để xem dải giá, xu hướng, gợi ý niêm yết và người bán.</div>
+    <section class="dashboard-panel dashboard-panel--analysis" id="dashboard-analysis-section" tabindex="-1">
+      <div class="dashboard-panel-title">Phân tích theo Sản phẩm &amp; thời điểm</div>
+      <div class="dashboard-panel-subtext">Drill-down từ market analytics xuống listing thật và classification reason.</div>
       <div class="dashboard-analysis-controls">
-        <label class="dashboard-form-field"><span>${escapeHtml(groupLabel)}</span><select id="dashboard-model-select">${groups.map((group) => `<option value="${escapeHtml(group)}" ${group === selectedModel ? 'selected' : ''}>${escapeHtml(group)}</option>`).join('')}</select></label>
+        <label class="dashboard-form-field dashboard-form-field--grow"><span>Sản phẩm</span><select id="dashboard-product-select">${products.map((key) => { const info = getDashboardProduct(analysis, key); return `<option value="${escapeHtml(key)}" ${key === selectedProduct ? 'selected' : ''}>${escapeHtml(info?.product_label || key)}</option>`; }).join('')}</select></label>
         <label class="dashboard-form-field dashboard-form-field--period"><span>Kỳ (${escapeHtml(periodLabel)})</span><select id="dashboard-period-select">${periods.map((period) => `<option value="${escapeHtml(period)}" ${period === selectedPeriod ? 'selected' : ''}>${escapeHtml(period)}</option>`).join('')}</select></label>
       </div>
-      ${current ? `
-        <div class="dashboard-product-meta"><b style="color:${selectedColor}">${escapeHtml(selectedModel)}</b> · ${escapeHtml(selectedPeriod)} · ${formatRecordCount(current.listing_count || 0)} listing · CV ${Number(current.cv || 0).toFixed(0)}%</div>
-        <div class="dashboard-mini-grid">
-          <div class="dashboard-mini-stat"><span>Người bán</span><strong>${formatRecordCount(current.seller_count || 0)}</strong><small>${renderDashboardDelta(current.seller_count, previous?.seller_count, 'number')}</small></div>
-          <div class="dashboard-mini-stat"><span>Thấp nhất</span><strong>${formatDashboardCurrency(current.min_price, currency)}</strong><small>${renderDashboardDelta(current.min_price, previous?.min_price, 'currency', currency)}</small></div>
-          <div class="dashboard-mini-stat"><span>Trung vị</span><strong>${formatDashboardCurrency(current.median_price, currency)}</strong><small>${renderDashboardDelta(current.median_price, previous?.median_price, 'currency', currency)}</small></div>
-          <div class="dashboard-mini-stat"><span>Giá TB</span><strong>${formatDashboardCurrency(current.avg_price, currency)}</strong><small>${renderDashboardDelta(current.avg_price, previous?.avg_price, 'currency', currency)}</small></div>
-          <div class="dashboard-mini-stat"><span>Cao nhất</span><strong>${formatDashboardCurrency(current.max_price, currency)}</strong><small>${renderDashboardDelta(current.max_price, previous?.max_price, 'currency', currency)}</small></div>
-          <div class="dashboard-mini-stat"><span>% hết hàng</span><strong>${Number(current.out_of_stock_pct || 0).toFixed(0)}%</strong><small>${renderDashboardDelta(current.out_of_stock_pct, previous?.out_of_stock_pct, 'points', currency, true)}</small></div>
-        </div>
-        <div class="dashboard-range-panel"><div class="dashboard-section-label">Dải giá trên thị trường</div><div class="dashboard-range-caption">Vùng tô đậm = 50% listing ở giữa (P25–P75); vạch = trung vị; chấm = giá TB.</div>${renderDashboardRangeSvg(current, selectedColor, currency)}</div>
-        <div class="dashboard-spark-grid">
-          <div class="dashboard-spark-panel"><div class="dashboard-section-label">Xu hướng giá TB 6 kỳ</div>${renderDashboardSparkline(selectedGroupRows, selectedPeriod, selectedColor)}<div class="dashboard-trend-text">${priceChange === null ? 'Chưa có kỳ trước để so sánh.' : `So kỳ trước: giá TB ${priceChange > 1 ? 'tăng' : (priceChange < -1 ? 'giảm' : 'đi ngang')} ${Math.abs(priceChange).toFixed(1)}%; người bán ${previous ? `${Number(current.seller_count || 0) - Number(previous.seller_count || 0) >= 0 ? '+' : ''}${Number(current.seller_count || 0) - Number(previous.seller_count || 0)}` : '—'}; CV ${Number(current.cv || 0).toFixed(0)}%.`}</div></div>
-          <div class="dashboard-spark-panel"><div class="dashboard-section-label">Gợi ý giá niêm yết</div>${recommendation ? `<div class="dashboard-suggestion-list">${recommendation.items.map((item) => `<div class="dashboard-suggestion ${item.label === recommendation.recommended ? 'dashboard-suggestion--active' : ''}"><span class="dashboard-suggestion-dot" style="background:${item.color}"></span><span class="dashboard-suggestion-copy"><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.note)}</small></span><strong>${formatDashboardCurrency(item.value, currency)}</strong></div>`).join('')}</div>` : '<div class="empty-state">Không đủ dữ liệu giá để tạo gợi ý.</div>'}</div>
-        </div>
-        ${recommendation ? `<div class="dashboard-note">${escapeHtml(recommendation.reason)}</div>` : ''}
-        <div class="dashboard-top-sellers-panel"><div class="dashboard-section-label">Top 10 người bán</div>${renderDashboardTopSellers(current.top_sellers || [], selectedColor, currency, current.seller_count)}</div>
-      ` : `<div class="empty-state">${escapeHtml(groupLabel)} không có dữ liệu trong kỳ đã chọn.</div>`}
+      ${drillBody}
     </section>
   `;
 
-  const groupBySelect = document.getElementById('dashboard-group-by');
-  if (groupBySelect) {
-    groupBySelect.addEventListener('change', async () => {
-      state.hqa.dashboard.groupBy = groupBySelect.value || 'model';
-      state.hqa.dashboard.selectedModel = '';
-      state.hqa.dashboard.selectedPeriod = '';
-      await loadHqaDashboardData();
-      renderHqaDashboard();
-    });
-  }
+  // ---- events ----
   const granularitySelect = document.getElementById('dashboard-granularity');
   if (granularitySelect) {
     granularitySelect.addEventListener('change', async () => {
@@ -1133,11 +1476,85 @@ function renderHqaDashboard() {
     });
   }
 
-  const modelSelect = document.getElementById('dashboard-model-select');
-  if (modelSelect) {
-    modelSelect.addEventListener('change', () => {
-      state.hqa.dashboard.selectedModel = modelSelect.value;
-      const availablePeriods = (analysis.group_periods || []).filter((item) => item.group === modelSelect.value).map((item) => item.period);
+  dashboardView.querySelectorAll('[data-dashboard-export]').forEach((button) => {
+    button.addEventListener('click', () => downloadDashboardCsv(button.dataset.dashboardExport || 'group_period'));
+  });
+
+  // Product picker (searchable multi-select driving BOTH charts)
+  const psTrigger = document.getElementById('dashboard-ps-trigger');
+  const psPop = document.getElementById('dashboard-ps-pop');
+  if (psTrigger && psPop) {
+    psPop.hidden = !state.hqa.dashboard.chartProductSelectorOpen;
+    psTrigger.setAttribute('aria-expanded', String(!!state.hqa.dashboard.chartProductSelectorOpen));
+    psTrigger.addEventListener('click', () => {
+      state.hqa.dashboard.chartProductSelectorOpen = !state.hqa.dashboard.chartProductSelectorOpen;
+      psPop.hidden = !state.hqa.dashboard.chartProductSelectorOpen;
+      psTrigger.setAttribute('aria-expanded', String(state.hqa.dashboard.chartProductSelectorOpen));
+    });
+  }
+  const psSearch = document.getElementById('dashboard-ps-search');
+  if (psSearch) {
+    psSearch.addEventListener('input', (event) => {
+      state.hqa.dashboard.chartProductSearch = event.target.value;
+      state.hqa.dashboard.chartProductVisible = DASHBOARD_CONFIG.productPageSize;
+      refreshDashboardSelectorUI();
+    });
+  }
+  const psLoadMore = document.getElementById('dashboard-ps-load-more');
+  if (psLoadMore) {
+    psLoadMore.addEventListener('click', () => {
+      state.hqa.dashboard.chartProductVisible += DASHBOARD_CONFIG.productPageSize;
+      refreshDashboardSelectorUI();
+    });
+  }
+  const psClear = document.getElementById('dashboard-ps-clear');
+  if (psClear) {
+    psClear.addEventListener('click', () => {
+      state.hqa.dashboard.chartProducts = [];
+      state.hqa.dashboard.chartWarn = '';
+      refreshDashboardSelectorUI();
+      renderDashboardComparisonCharts();
+    });
+  }
+  const psSelectLoaded = document.getElementById('dashboard-ps-select-loaded');
+  if (psSelectLoaded) {
+    psSelectLoaded.addEventListener('change', (event) => {
+      const dashboard = state.hqa.dashboard;
+      const max = DASHBOARD_CONFIG.productSeriesMax;
+      const loaded = dashboardFilteredProducts().slice(0, dashboard.chartProductVisible);
+      if (event.target.checked) {
+        let hitLimit = false;
+        for (const product of loaded) {
+          if (dashboard.chartProducts.includes(product.product_key)) continue;
+          if (dashboard.chartProducts.length >= max) { hitLimit = true; break; }
+          dashboard.chartProducts = [...dashboard.chartProducts, product.product_key];
+        }
+        dashboard.chartWarn = hitLimit ? `Chỉ có thể hiển thị tối đa ${max} sản phẩm cùng lúc để biểu đồ dễ đọc.` : '';
+      } else {
+        const remove = new Set(loaded.map((product) => product.product_key));
+        dashboard.chartProducts = dashboard.chartProducts.filter((key) => !remove.has(key));
+        dashboard.chartWarn = '';
+      }
+      refreshDashboardSelectorUI();
+      renderDashboardComparisonCharts();
+    });
+  }
+  const psList = document.getElementById('dashboard-ps-list');
+  if (psList) {
+    psList.addEventListener('change', (event) => {
+      const checkbox = event.target.closest('input[data-dashboard-ps-id]');
+      if (!checkbox) return;
+      toggleDashboardProduct(checkbox.getAttribute('data-dashboard-ps-id'), checkbox);
+    });
+  }
+
+  // Drill-down selectors
+  const productSelect = document.getElementById('dashboard-product-select');
+  if (productSelect) {
+    productSelect.addEventListener('change', () => {
+      state.hqa.dashboard.selectedProduct = productSelect.value;
+      state.hqa.dashboard.roleFilter = 'all';
+      const availablePeriods = (analysis.group_periods || []).filter((item) => item.group === productSelect.value).map((item) => item.period);
       if (!availablePeriods.includes(state.hqa.dashboard.selectedPeriod)) {
         state.hqa.dashboard.selectedPeriod = availablePeriods[availablePeriods.length - 1] || analysis.latest_period?.period || '';
       }
@@ -1151,11 +1568,32 @@ function renderHqaDashboard() {
       renderHqaDashboard();
     });
   }
-  dashboardView.querySelectorAll('[data-dashboard-export]').forEach((button) => {
-    button.addEventListener('click', () => downloadDashboardCsv(button.dataset.dashboardExport || 'group_period'));
+
+  // Alert cards -> select product + period, re-render, scroll + flash + focus
+  dashboardView.querySelectorAll('[data-dashboard-alert-product]').forEach((card) => {
+    card.addEventListener('click', () => {
+      const productKey = card.getAttribute('data-dashboard-alert-product');
+      const period = card.getAttribute('data-dashboard-alert-period');
+      if (productKey) state.hqa.dashboard.selectedProduct = productKey;
+      if (period) state.hqa.dashboard.selectedPeriod = period;
+      state.hqa.dashboard.roleFilter = 'all';
+      renderHqaDashboard();
+      requestAnimationFrame(() => {
+        const section = document.getElementById('dashboard-analysis-section');
+        if (!section) return;
+        section.classList.remove('dashboard-analysis-flash');
+        void section.offsetWidth;
+        section.classList.add('dashboard-analysis-flash');
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        try { section.focus({ preventScroll: true }); } catch (error) { section.focus(); }
+      });
+    });
   });
 
-  renderDashboardCharts(analysis);
+  bindDashboardRoleCards();
+  ensureDashboardGlobalListeners();
+  refreshDashboardSelectorUI();
+  renderDashboardComparisonCharts();
 }
 
 function dataCheckGroupKey(item) {
@@ -2926,186 +3364,5 @@ async function renderSystem(content) {
 if (typeof window !== 'undefined') {
   window.__hqaState = state;
 }
-
-
-// --- HQA Dashboard Product Analytics v5 (integrated) ---
-// HQA Product-first Marketing Dashboard. Integrated in app.js before bootstrap().
-(function () {
-  'use strict';
-  const PD_MAX = 10;
-  const PD_PAGE = 30;
-  const PD_COLORS = ['#2F6BE4','#7C5CFC','#16A34A','#F59E0B','#475569','#EF4444','#0891B2','#C026D3','#0F766E','#C2410C'];
-  const PD_DASH = [[],[7,4],[2,3],[9,3,2,3],[12,4],[4,3],[10,2],[2,2,8,2],[6,2,2,2],[14,4]];
-  const PD_POINTS = ['circle','rect','triangle','rectRot','star','crossRot','cross','rectRounded','dash','line'];
-  let pdOutsideBound = false;
-  let pdSearchTimer = null;
-
-  function pdEsc(value) { return escapeHtml(value == null ? '' : String(value)); }
-  function pdCount(value) { return formatRecordCount(Number(value || 0)); }
-  function pdMonthEnd(period) {
-    const match = /^(\d{4})-(\d{2})$/.exec(String(period || ''));
-    if (!match) return '';
-    const day = new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).getUTCDate();
-    return `${match[1]}-${match[2]}-${String(day).padStart(2,'0')}`;
-  }
-  function pdStyle(key) {
-    let hash = 2166136261;
-    String(key || 'product').split('').forEach((char) => { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); });
-    const slot = Math.abs(hash >>> 0) % PD_COLORS.length;
-    return { color: PD_COLORS[slot], dash: PD_DASH[slot], pointStyle: PD_POINTS[slot] };
-  }
-  function pdState() {
-    const d = state.hqa.dashboard;
-    if (!Array.isArray(d.chartProducts)) d.chartProducts = [];
-    if (typeof d.chartProductSearch !== 'string') d.chartProductSearch = '';
-    if (!Number.isFinite(Number(d.chartProductPage))) d.chartProductPage = 1;
-    if (typeof d.chartProductSelectorOpen !== 'boolean') d.chartProductSelectorOpen = false;
-    if (typeof d.dashboardSearch !== 'string') d.dashboardSearch = '';
-    if (typeof d.dashboardSearchDraft !== 'string') d.dashboardSearchDraft = d.dashboardSearch;
-    if (typeof d.dashboardPeriod !== 'string') d.dashboardPeriod = '';
-    if (typeof d.selectedProduct !== 'string') d.selectedProduct = d.selectedModel || '';
-    if (!d.drilldownCache) d.drilldownCache = {};
-    if (typeof d.detailLoadingKey !== 'string') d.detailLoadingKey = '';
-    if (typeof d.roleFilter !== 'string') d.roleFilter = 'all';
-    if (typeof d.seriesWarning !== 'string') d.seriesWarning = '';
-    d.groupBy = 'product'; d.granularity = 'month';
-    return d;
-  }
-  function pdProducts(a) { return Array.isArray(a?.products) ? a.products : []; }
-  function pdProductMap(a) { return new Map(pdProducts(a).map((p) => [String(p.product_key), p])); }
-  function pdRows(a, key) { return (a?.group_periods || []).filter((r) => String(r.product_key || r.group) === String(key)).sort((x,y)=>String(x.period).localeCompare(String(y.period))); }
-  function pdRow(a,key,period) { return (a?.group_periods || []).find((r)=>String(r.product_key || r.group)===String(key) && r.period===period) || null; }
-  function pdPrev(a,key,period) { const rows=pdRows(a,key); const i=rows.findIndex((r)=>r.period===period); return i>0?rows[i-1]:null; }
-  function pdProductLabel(a,key) { return pdProductMap(a).get(String(key))?.product_label || key || 'Sản phẩm'; }
-  function pdPreserve(a, defaults) {
-    const d=pdState(), products=pdProducts(a), valid=new Set(products.map((p)=>String(p.product_key)));
-    d.chartProducts=(d.chartProducts||[]).filter((key)=>valid.has(String(key))).slice(0,PD_MAX);
-    if (defaults && !d.chartProducts.length) d.chartProducts=products.slice(0,4).map((p)=>String(p.product_key));
-    if (!valid.has(String(d.selectedProduct))) d.selectedProduct=d.chartProducts[0] || String(products[0]?.product_key || '');
-    const periods=pdRows(a,d.selectedProduct).map((r)=>r.period);
-    if (!periods.includes(d.selectedPeriod)) d.selectedPeriod=periods.at(-1) || a?.latest_period?.period || '';
-    if (!d.dashboardPeriod) d.dashboardPeriod=a?.latest_period?.period || (a?.periods||[]).at(-1) || '';
-  }
-
-  syncDashboardFiltersFromAllListings = function () {
-    const d=pdState();
-    d.appliedFilters={ keyword:d.dashboardSearch||'', marketplaces:[], brands:[], models:[], conditions:[], statuses:[], categoryNames:[], buyingOptions:[], dateFrom:'', dateTo:d.dashboardPeriod?pdMonthEnd(d.dashboardPeriod):'', minPrice:'', maxPrice:'', currency:'' };
-  };
-
-  loadHqaDashboardData = async function () {
-    const d=pdState(); d.loading=true; d.error='';
-    try {
-      const params=new URLSearchParams({group_by:'product',granularity:'month',price_drop_warning_pct:'20',price_drop_critical_pct:'30',out_of_stock_warning_points:'30',out_of_stock_critical_points:'50'});
-      if (d.dashboardSearch) params.set('keyword',d.dashboardSearch.trim());
-      if (d.dashboardPeriod) params.set('date_to',pdMonthEnd(d.dashboardPeriod));
-      const payload=await api(`/hqa/dashboard/analysis?${params.toString()}`);
-      d.analysis=payload; pdPreserve(payload,true);
-    } catch (error) { d.error=error?.message||'Không thể tải Dashboard sản phẩm.'; d.analysis=null; }
-    finally { d.loading=false; }
-  };
-
-  async function pdLoadDetail(productKey, period, force=false) {
-    if (!productKey || !period) return null;
-    const d=pdState(), cacheKey=`${productKey}@@${period}`;
-    if (!force && d.drilldownCache[cacheKey]) return d.drilldownCache[cacheKey];
-    if (d.detailLoadingKey===cacheKey) return null;
-    d.detailLoadingKey=cacheKey; renderHqaDashboard();
-    try {
-      const params=new URLSearchParams({group_by:'product',granularity:'month',keyword:productKey,date_to:pdMonthEnd(period),price_drop_warning_pct:'20',price_drop_critical_pct:'30',out_of_stock_warning_points:'30',out_of_stock_critical_points:'50'});
-      const payload=await api(`/hqa/dashboard/analysis?${params.toString()}`);
-      d.drilldownCache[cacheKey]=payload?.drilldown || null;
-      return d.drilldownCache[cacheKey];
-    } catch (error) { d.error=error?.message||'Không thể tải chi tiết sản phẩm.'; return null; }
-    finally { d.detailLoadingKey=''; renderHqaDashboard(); }
-  }
-
-  renderDashboardAlerts = function (alerts) {
-    if (!alerts?.length) return '<div class="pd-empty">Không phát hiện bất thường đáng kể trong kỳ.</div>';
-    const meta={critical:['Nghiêm trọng','pd-critical'],warning:['Đáng chú ý','pd-warning'],info:['Theo dõi','pd-info']};
-    return `<div class="pd-alert-row">${alerts.map((a)=>{ const m=meta[String(a.severity||'info').toLowerCase()]||meta.info; let metric=a.message||'';
-      if(a.type==='price_drop') metric=`Giá TB ${formatDashboardCurrency(a.previous_avg_price,a.currency)} → ${formatDashboardCurrency(a.current_avg_price,a.currency)} (${Number(a.change_percent||0).toFixed(1)}%)`;
-      if(a.type==='new_low') metric=`Đáy mới ${formatDashboardCurrency(a.current_min_price,a.currency)} · đáy cũ ${formatDashboardCurrency(a.previous_floor_price,a.currency)}`;
-      if(a.type==='new_seller') metric=`${pdCount(a.new_seller_count)} người bán mới`;
-      if(a.type==='out_of_stock_spike') metric=`Hết hàng ${Number(a.previous_out_of_stock_pct||0).toFixed(0)}% → ${Number(a.current_out_of_stock_pct||0).toFixed(0)}%`;
-      return `<button type="button" class="pd-alert ${m[1]}" data-pd-alert-product="${pdEsc(a.product_key||a.group)}" data-pd-alert-period="${pdEsc(a.period)}"><span class="pd-alert-top"><b>${pdEsc(a.product_label||a.group)}</b><i>${m[0]}</i></span><strong>${pdEsc(a.title||'Cảnh báo')}</strong><span>${pdEsc(metric)}</span><small>Xem phân tích →</small></button>`;
-    }).join('')}</div>`;
-  };
-
-  renderDashboardCharts = function (analysis) {
-    destroyHqaDashboardCharts();
-    if (typeof Chart==='undefined' || !analysis?.periods?.length) return;
-    const d=pdState(), keys=d.chartProducts||[], productMap=pdProductMap(analysis), map=new Map((analysis.group_periods||[]).map((r)=>[`${r.product_key||r.group}@@${r.period}`,r]));
-    if (!keys.length) return;
-    const datasets=(field)=>keys.map((key)=>{ const s=pdStyle(key); return { label:productMap.get(String(key))?.product_label||key, data:analysis.periods.map((period)=>{const r=map.get(`${key}@@${period}`); const v=r?Number(r[field]):NaN; return Number.isFinite(v)?v:null;}), borderColor:s.color, backgroundColor:s.color, borderDash:s.dash, pointStyle:s.pointStyle, borderWidth:2, pointRadius:3, pointHoverRadius:5, tension:.28, spanGaps:false }; });
-    const options=(formatter)=>({responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>`${ctx.dataset.label}: ${formatter(ctx.parsed.y)}`}}},scales:{x:{grid:{display:false},ticks:{color:'#64748B',maxTicksLimit:8}},y:{grid:{color:'#EDF1F7'},border:{display:false},ticks:{color:'#64748B',callback:formatter}}}});
-    const price=document.getElementById('pd-price-chart'); if(price) hqaDashboardCharts.push(new Chart(price,{type:'line',data:{labels:analysis.periods,datasets:datasets('avg_price')},options:options((v)=>formatDashboardCurrency(v,analysis.latest_period?.currency||'USD'))}));
-    const sellers=document.getElementById('pd-seller-chart'); if(sellers) hqaDashboardCharts.push(new Chart(sellers,{type:'line',data:{labels:analysis.periods,datasets:datasets('seller_count')},options:options((v)=>formatDashboardNumber(v,0))}));
-  };
-
-  function pdSelector(analysis) {
-    const d=pdState(), all=pdProducts(analysis), q=d.chartProductSearch.trim().toLowerCase();
-    const filtered=all.filter((p)=>!q || [p.product_label,p.keyword,p.brand,p.model,p.product_id].some((v)=>String(v||'').toLowerCase().includes(q)));
-    const visible=filtered.slice(0,Math.max(PD_PAGE,Number(d.chartProductPage||1)*PD_PAGE));
-    const selected=d.chartProducts||[], map=pdProductMap(analysis), chips=selected.slice(0,3).map((key)=>`<span>${pdEsc(map.get(String(key))?.product_label||key)}</span>`).join('') + (selected.length>3?`<span>+${selected.length-3}</span>`:'');
-    return `<div class="pd-series"><button type="button" class="pd-series-trigger" id="pd-series-trigger" aria-expanded="${d.chartProductSelectorOpen?'true':'false'}"><span class="pd-chip-wrap">${chips||'<em>Chọn sản phẩm để so sánh</em>'}</span><b>${selected.length}/${PD_MAX} ▾</b></button>${d.chartProductSelectorOpen?`<div class="pd-series-menu" role="dialog" aria-label="Chọn sản phẩm cho biểu đồ"><input id="pd-series-search" type="search" placeholder="Tìm theo tên sản phẩm, brand, model..." value="${pdEsc(d.chartProductSearch)}"><div class="pd-series-actions"><label><input id="pd-series-all" type="checkbox"> Chọn tất cả đã tải</label><button type="button" data-pd-series-clear>Clear</button></div>${d.seriesWarning?`<div class="pd-limit">${pdEsc(d.seriesWarning)}</div>`:''}<div class="pd-series-list">${visible.map((p)=>`<label class="pd-series-option"><input type="checkbox" data-pd-series-key="${pdEsc(p.product_key)}" ${selected.includes(String(p.product_key))?'checked':''}><span><b>${pdEsc(p.product_label)}</b><small>${pdEsc([p.brand,p.model,p.product_type].filter(Boolean).join(' · '))}</small></span><i>${pdCount(p.listing_count)} listing · ${pdCount(p.seller_count)} seller${Number(p.excluded_count||0)?` · ${pdCount(p.excluded_count)} excluded`:''}</i></label>`).join('')||'<div class="pd-empty">Không tìm thấy sản phẩm.</div>'}</div><div class="pd-series-footer">${visible.length<filtered.length?'<button type="button" data-pd-series-more>Load more</button>':'<span>Đã tải hết</span>'}</div></div>`:''}</div>`;
-  }
-
-  function pdLegend(analysis) { const map=pdProductMap(analysis); return (pdState().chartProducts||[]).map((key)=>{const s=pdStyle(key); return `<span class="pd-legend"><i style="background:${s.color}"></i>${pdEsc(map.get(String(key))?.product_label||key)}</span>`;}).join(''); }
-  function pdDelta(current,previous,suffix='') { const a=Number(current),b=Number(previous); if(!Number.isFinite(a)||!Number.isFinite(b)) return '—'; const d=a-b; return `${d>0?'+':''}${suffix==='%'?d.toFixed(1):formatDashboardNumber(d,0)}${suffix}`; }
-  function pdRoleFilter(row,filter) { if(filter==='all') return true; if(filter==='other') return ['documentation_media','irrelevant'].includes(row.listing_role); if(filter==='components') return row.listing_role==='component_part'; if(filter==='accessories') return row.listing_role==='accessory'; if(filter==='whole') return row.listing_role==='whole_product'; if(filter==='uncertain') return row.listing_role==='uncertain'; return true; }
-  function pdRoleBadge(role) { const label={whole_product:'Sản phẩm hoàn chỉnh',component_part:'Linh kiện',accessory:'Phụ kiện',documentation_media:'Tài liệu',irrelevant:'Không liên quan',uncertain:'Chưa chắc chắn'}[role]||role; return `<span class="pd-role pd-role-${pdEsc(role)}">${pdEsc(label)}</span>`; }
-  function pdCsv(rows,filename) { if(!rows?.length){pdState().error='Không có dữ liệu để xuất CSV.';renderHqaDashboard();return;} const headers=[...rows.reduce((s,r)=>{Object.keys(r).forEach((k)=>s.add(k));return s;},new Set())]; const text='\ufeff'+headers.map(dashboardCsvCell).join(',')+'\r\n'+rows.map((r)=>headers.map((h)=>dashboardCsvCell(r[h])).join(',')).join('\r\n'); const url=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})); const a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url); }
-
-  downloadDashboardCsv = function (dataset) {
-    const d=pdState(), a=d.analysis; if(!a)return; let rows=[],name=`hqa_dashboard_${dataset}.csv`;
-    if(dataset==='group_period') rows=(a.group_periods||[]).map((r)=>({...r,top_sellers:undefined,new_sellers:(r.new_sellers||[]).join(' | ')}));
-    if(dataset==='alerts') rows=(a.alerts||[]).map((r)=>({...r,new_sellers:(r.new_sellers||[]).join(' | ')}));
-    const detail=d.drilldownCache[`${d.selectedProduct}@@${d.selectedPeriod}`];
-    if(dataset==='top_sellers') rows=(detail?.current?.top_sellers||[]).map((r,i)=>({rank:i+1,product:detail.product?.product_label,period:d.selectedPeriod,...r,currency:detail.current?.currency}));
-    if(dataset==='role_audit') rows=(detail?.related_listings||[]).map((r)=>({...r,role_reasons:(r.role_reasons||[]).join(' | ')}));
-    pdCsv(rows,name);
-  };
-
-  function pdDetail(analysis) {
-    const d=pdState(), product=pdProductMap(analysis).get(String(d.selectedProduct)), rows=pdRows(analysis,d.selectedProduct), periods=rows.map((r)=>r.period), cacheKey=`${d.selectedProduct}@@${d.selectedPeriod}`, detail=d.drilldownCache[cacheKey], current=detail?.current||pdRow(analysis,d.selectedProduct,d.selectedPeriod), previous=detail?.previous||pdPrev(analysis,d.selectedProduct,d.selectedPeriod), loading=d.detailLoadingKey===cacheKey;
-    if(!product) return '<div class="pd-empty">Chưa có sản phẩm để phân tích.</div>';
-    const color=pdStyle(product.product_key).color, recommendation=current?buildDashboardRecommendation(current,previous):null, priceChange=current&&previous?dashboardPercentChange(current.avg_price,previous.avg_price):null;
-    const breakdown=detail?.role_breakdown||{}; const related=(detail?.related_listings||[]).filter((r)=>pdRoleFilter(r,d.roleFilter));
-    return `<section class="pd-panel pd-analysis" id="pd-analysis" tabindex="-1"><div class="pd-panel-head"><div><h3>Phân tích theo Sản phẩm &amp; thời điểm</h3><p>Chọn Sản phẩm và kỳ để xem dải giá, xu hướng 6 kỳ, gợi ý niêm yết, người bán và listing liên quan.</p></div></div><div class="pd-detail-controls"><label>Sản phẩm<select id="pd-detail-product">${pdProducts(analysis).map((p)=>`<option value="${pdEsc(p.product_key)}" ${String(p.product_key)===String(d.selectedProduct)?'selected':''}>${pdEsc(p.product_label)}</option>`).join('')}</select></label><label>Kỳ<select id="pd-detail-period">${periods.map((p)=>`<option ${p===d.selectedPeriod?'selected':''}>${pdEsc(p)}</option>`).join('')}</select></label></div><div class="pd-product-title"><b style="color:${color}">${pdEsc(product.product_label)}</b><span>${pdEsc([product.brand,product.model,product.product_id].filter(Boolean).join(' · '))}</span>${current?`<small>${pdCount(current.listing_count)} whole-product / ${pdCount(current.related_listing_count)} liên quan · CV ${Number(current.cv||0).toFixed(1)}%</small>`:''}</div>${loading?'<div class="pd-loading">Đang tải listing liên quan...</div>':''}${current?`<div class="pd-mini-grid">${[['Listing hợp lệ',current.listing_count],['Listing liên quan',current.related_listing_count],['Người bán',current.seller_count],['Min',formatDashboardCurrency(current.min_price,current.currency)],['Median',formatDashboardCurrency(current.median_price,current.currency)],['Avg',formatDashboardCurrency(current.avg_price,current.currency)],['Max',formatDashboardCurrency(current.max_price,current.currency)],['% hết hàng',`${Number(current.out_of_stock_pct||0).toFixed(1)}%`]].map(([l,v])=>`<div><span>${l}</span><strong>${v}</strong></div>`).join('')}</div><div class="pd-note">Dữ liệu giá dùng ${pdCount(current.price_sample||0)}/${pdCount(current.related_listing_count||0)} listing; đã loại ${pdCount(current.excluded_from_market_analytics_count||0)} listing không phải sản phẩm hoàn chỉnh.</div><div class="pd-role-grid">${[['whole_product','Sản phẩm hoàn chỉnh'],['component_part','Linh kiện'],['accessory','Phụ kiện'],['documentation_media','Tài liệu'],['irrelevant','Không liên quan'],['uncertain','Chưa chắc chắn']].map(([role,label])=>`<div>${pdRoleBadge(role)}<strong>${pdCount(breakdown[role]??(role==='whole_product'?current.whole_product_count:0))}</strong><small>${label}</small></div>`).join('')}</div><div class="dashboard-range-panel"><div class="dashboard-section-label">Dải giá trên thị trường</div>${renderDashboardRangeSvg(current,color,current.currency)}</div><div class="pd-two"><div class="dashboard-spark-panel"><div class="dashboard-section-label">Xu hướng giá TB 6 kỳ</div>${renderDashboardSparkline(rows,d.selectedPeriod,color)}<p>${priceChange===null?'Chưa có kỳ trước để so sánh.':`So kỳ trước: giá TB ${priceChange<0?'giảm':'tăng'} ${Math.abs(priceChange).toFixed(1)}%; người bán ${pdDelta(current.seller_count,previous?.seller_count)}; CV ${Number(current.cv||0).toFixed(1)}%.`}</p></div><div class="dashboard-spark-panel"><div class="dashboard-section-label">Gợi ý giá niêm yết</div>${recommendation?`<div class="pd-recommend">${recommendation.items.map((x)=>`<div class="${x.label===recommendation.recommended?'active':''}"><span>${pdEsc(x.label)}<small>${pdEsc(x.note)}</small></span><strong>${formatDashboardCurrency(x.value,current.currency)}</strong></div>`).join('')}</div><p>${pdEsc(recommendation.reason)}</p>`:'<div class="pd-empty">Không đủ dữ liệu giá.</div>'}</div></div><div class="dashboard-top-sellers-panel"><div class="dashboard-section-label">Top 10 người bán</div>${renderDashboardTopSellers(current.top_sellers||[],color,current.currency,current.seller_count)}</div>`:'<div class="pd-empty">Không có đủ listing sản phẩm hoàn chỉnh để phân tích giá trong kỳ này.</div>'}${detail?`<div class="pd-listings"><div class="pd-listings-head"><h4>Listings của sản phẩm</h4><div>${[['all','All'],['whole','Whole product'],['components','Components'],['accessories','Accessories'],['other','Other'],['uncertain','Uncertain']].map(([v,l])=>`<button type="button" data-pd-role-filter="${v}" class="${d.roleFilter===v?'active':''}">${l}</button>`).join('')}</div></div><div class="table-wrap"><table><thead><tr><th>Listing title</th><th>Role</th><th>Confidence</th><th>Reason</th><th>Marketplace</th><th>Seller</th><th>Price</th><th>Condition</th><th>Category</th><th>Status</th><th>Listing ID</th></tr></thead><tbody>${related.map((r)=>`<tr><td><a href="${pdEsc(r.listing_url||'#')}" target="_blank" rel="noopener">${pdEsc(r.listing_title||'-')}</a></td><td>${pdRoleBadge(r.listing_role)}</td><td>${pdCount(r.role_confidence)}%</td><td title="${pdEsc((r.role_reasons||[]).join('; '))}">${pdEsc((r.role_reasons||[]).join('; '))}</td><td>${pdEsc(r.marketplace||'-')}</td><td>${pdEsc(r.seller||'-')}</td><td>${formatDashboardCurrency(r.price,r.currency)}</td><td>${pdEsc(r.condition||'-')}</td><td>${pdEsc(r.category||'-')}</td><td>${pdEsc(r.status||'-')}</td><td>${pdEsc(r.listing_id||'-')}</td></tr>`).join('')||'<tr><td colspan="11">Không có listing theo bộ lọc role.</td></tr>'}</tbody></table></div></div>`:''}</section>`;
-  }
-
-  renderHqaDashboard = function () {
-    const view=document.getElementById('hqa-dashboard-view'); if(!view)return; const d=pdState(),a=d.analysis; destroyHqaDashboardCharts();
-    if(d.loading&&!a){view.innerHTML='<div class="dashboard-loading"><span class="loading-spinner"></span><span>Đang phân tích dữ liệu sản phẩm...</span></div>';return;}
-    if(!a){view.innerHTML=`${d.error?`<div class="error">${pdEsc(d.error)}</div>`:''}<div class="pd-empty">Chưa có dữ liệu Dashboard.</div>`;return;}
-    pdPreserve(a,false); const latest=a.latest_period||{}, periods=a.periods||[], noWhole=Number(latest.listing_count||0)===0, uncertain=Number(latest.uncertain_pct||0);
-    view.innerHTML=`<div class="pd-dashboard"><div class="pd-toolbar"><div><b>Marketing Dashboard</b><span>Listing thực tế → Sản phẩm → phân loại role → whole-product analytics</span></div><label>Tháng<select id="pd-month"><option value="">Mới nhất</option>${periods.map((p)=>`<option value="${pdEsc(p)}" ${d.dashboardPeriod===p?'selected':''}>${pdEsc(p)}</option>`).join('')}</select></label><label class="pd-global-search">Sản phẩm / Keyword<div><input id="pd-global-search" value="${pdEsc(d.dashboardSearchDraft)}" placeholder="JBL L26, Yamaha FG800..."><button type="button" id="pd-global-apply">Lọc</button>${d.dashboardSearch?'<button type="button" id="pd-global-clear" class="secondary">Xóa</button>':''}</div></label><div class="pd-export"><button data-pd-export="group_period">Tổng hợp CSV</button><button data-pd-export="alerts">Cảnh báo CSV</button><button data-pd-export="top_sellers">Top 10 CSV</button><button data-pd-export="role_audit">Role audit CSV</button></div></div>${d.error?`<div class="error">${pdEsc(d.error)}</div>`:''}${uncertain>=15?`<div class="pd-quality">${uncertain.toFixed(1)}% listing chưa phân loại chắc chắn; market analytics đang loại các listing này.</div>`:''}${noWhole?`<div class="pd-quality neutral">${Number(latest.related_listing_count||0)>0?`Có ${pdCount(latest.related_listing_count)} listing liên quan nhưng chưa có listing sản phẩm hoàn chỉnh đủ điều kiện phân tích.`:'Không có đủ listing sản phẩm hoàn chỉnh để phân tích giá trong kỳ này.'}</div>`:''}<div class="pd-kpis">${[['Listing phân tích',pdCount(latest.listing_count),`${pdCount(latest.whole_product_count)} whole-product / ${pdCount(latest.related_listing_count)} liên quan`],['Sản phẩm',pdCount(latest.product_count),'có whole-product data'],['Người bán',pdCount(latest.seller_count),'distinct seller'],['Giá trung vị',formatDashboardCurrency(latest.median_price,latest.currency),'whole-product listings'],['Hết hàng',pdCount(latest.out_of_stock_count),`${Number(latest.out_of_stock_pct||0).toFixed(1)}% whole-product`]].map(([l,v,s])=>`<article><span>${l}</span><strong>${v}</strong><small>${s}</small></article>`).join('')}</div><section class="pd-panel"><div class="pd-panel-head"><div><h3>Cảnh báo bất thường</h3><p>Whole-product analytics · click để xem đúng Sản phẩm × kỳ.</p></div><b>${pdCount((a.alerts||[]).length)} cảnh báo</b></div>${renderDashboardAlerts(a.alerts||[])}</section><section class="pd-panel"><div class="pd-panel-head"><div><h3>Xu hướng thị trường theo sản phẩm</h3><p>Một selector chung điều khiển cả hai chart.</p></div></div>${pdSelector(a)}<div class="pd-chart-grid"><article><h4>Giá trung bình theo tháng</h4><p>AVG(price) · whole_product eligible</p><div class="pd-legend-row">${pdLegend(a)}</div><div class="pd-canvas">${d.chartProducts.length?'<canvas id="pd-price-chart"></canvas>':'<div class="pd-empty">Chọn ít nhất 1 sản phẩm để hiển thị biểu đồ.</div>'}</div></article><article><h4>Số người bán theo tháng</h4><p>COUNT DISTINCT seller · whole_product eligible</p><div class="pd-legend-row">${pdLegend(a)}</div><div class="pd-canvas">${d.chartProducts.length?'<canvas id="pd-seller-chart"></canvas>':'<div class="pd-empty">Chọn ít nhất 1 sản phẩm để hiển thị biểu đồ.</div>'}</div></article></div></section>${pdDetail(a)}</div>`;
-    pdBind(view); renderDashboardCharts(a);
-    const key=`${d.selectedProduct}@@${d.selectedPeriod}`; if(d.selectedProduct&&d.selectedPeriod&&!d.drilldownCache[key]&&!d.detailLoadingKey) setTimeout(()=>pdLoadDetail(d.selectedProduct,d.selectedPeriod),0);
-  };
-
-  function pdBind(view) {
-    const d=pdState(),a=d.analysis;
-    view.querySelector('#pd-month')?.addEventListener('change',async(e)=>{d.dashboardPeriod=e.target.value;d.selectedPeriod='';await loadHqaDashboardData();renderHqaDashboard();});
-    const search=view.querySelector('#pd-global-search'); if(search){search.addEventListener('input',(e)=>{d.dashboardSearchDraft=e.target.value;});search.addEventListener('keydown',(e)=>{if(e.key==='Enter'){e.preventDefault();view.querySelector('#pd-global-apply')?.click();}});}
-    view.querySelector('#pd-global-apply')?.addEventListener('click',async()=>{d.dashboardSearch=d.dashboardSearchDraft.trim();d.chartProducts=[];d.selectedProduct='';d.drilldownCache={};await loadHqaDashboardData();renderHqaDashboard();});
-    view.querySelector('#pd-global-clear')?.addEventListener('click',async()=>{d.dashboardSearch='';d.dashboardSearchDraft='';d.chartProducts=[];d.selectedProduct='';d.drilldownCache={};await loadHqaDashboardData();renderHqaDashboard();});
-    view.querySelector('#pd-series-trigger')?.addEventListener('click',(e)=>{e.stopPropagation();d.chartProductSelectorOpen=!d.chartProductSelectorOpen;d.seriesWarning='';renderHqaDashboard();});
-    view.querySelector('#pd-series-search')?.addEventListener('input',(e)=>{clearTimeout(pdSearchTimer); const value=e.target.value;pdSearchTimer=setTimeout(()=>{d.chartProductSearch=value;d.chartProductPage=1;renderHqaDashboard();},180);});
-    view.querySelectorAll('[data-pd-series-key]').forEach((input)=>input.addEventListener('change',()=>{const key=String(input.dataset.pdSeriesKey); if(input.checked&&!d.chartProducts.includes(key)){if(d.chartProducts.length>=PD_MAX){d.seriesWarning='Chỉ có thể hiển thị tối đa 10 sản phẩm cùng lúc để biểu đồ dễ đọc.';}else d.chartProducts=[...d.chartProducts,key];}else if(!input.checked)d.chartProducts=d.chartProducts.filter((x)=>x!==key);renderHqaDashboard();}));
-    view.querySelector('#pd-series-all')?.addEventListener('change',(e)=>{if(!e.target.checked)return;const q=d.chartProductSearch.trim().toLowerCase(), visible=pdProducts(a).filter((p)=>!q||[p.product_label,p.keyword,p.brand,p.model,p.product_id].some((v)=>String(v||'').toLowerCase().includes(q))).slice(0,Math.max(PD_PAGE,d.chartProductPage*PD_PAGE));const slots=PD_MAX-d.chartProducts.length;const add=visible.map((p)=>String(p.product_key)).filter((k)=>!d.chartProducts.includes(k)).slice(0,slots);d.chartProducts=[...d.chartProducts,...add];if(add.length<visible.filter((p)=>!d.chartProducts.includes(String(p.product_key))).length)d.seriesWarning='Chỉ có thể hiển thị tối đa 10 sản phẩm cùng lúc để biểu đồ dễ đọc.';renderHqaDashboard();});
-    view.querySelector('[data-pd-series-clear]')?.addEventListener('click',()=>{d.chartProducts=[];d.seriesWarning='';renderHqaDashboard();});
-    view.querySelector('[data-pd-series-more]')?.addEventListener('click',()=>{d.chartProductPage+=1;renderHqaDashboard();});
-    view.querySelectorAll('[data-pd-alert-product]').forEach((btn)=>btn.addEventListener('click',async()=>{d.selectedProduct=btn.dataset.pdAlertProduct;d.selectedPeriod=btn.dataset.pdAlertPeriod;await pdLoadDetail(d.selectedProduct,d.selectedPeriod,true);const section=document.getElementById('pd-analysis');section?.scrollIntoView({behavior:'smooth',block:'start'});section?.classList.add('pd-highlight');section?.focus({preventScroll:true});setTimeout(()=>section?.classList.remove('pd-highlight'),1600);}));
-    view.querySelector('#pd-detail-product')?.addEventListener('change',async(e)=>{d.selectedProduct=e.target.value;const periods=pdRows(a,d.selectedProduct).map((r)=>r.period);d.selectedPeriod=periods.at(-1)||'';await pdLoadDetail(d.selectedProduct,d.selectedPeriod);});
-    view.querySelector('#pd-detail-period')?.addEventListener('change',async(e)=>{d.selectedPeriod=e.target.value;await pdLoadDetail(d.selectedProduct,d.selectedPeriod);});
-    view.querySelectorAll('[data-pd-role-filter]').forEach((btn)=>btn.addEventListener('click',()=>{d.roleFilter=btn.dataset.pdRoleFilter;renderHqaDashboard();}));
-    view.querySelectorAll('[data-pd-export]').forEach((btn)=>btn.addEventListener('click',()=>downloadDashboardCsv(btn.dataset.pdExport)));
-    if(!pdOutsideBound){pdOutsideBound=true;document.addEventListener('click',(e)=>{if(!pdState().chartProductSelectorOpen)return;if(e.target.closest?.('.pd-series'))return;pdState().chartProductSelectorOpen=false;if(state.hqa.mainTab==='dashboard')renderHqaDashboard();});document.addEventListener('keydown',(e)=>{if(e.key==='Escape'&&pdState().chartProductSelectorOpen){pdState().chartProductSelectorOpen=false;if(state.hqa.mainTab==='dashboard')renderHqaDashboard();}});}
-  }
-
-  pdState();
-})();
-// --- end HQA Dashboard Product Analytics v5 ---
 
 bootstrap();
