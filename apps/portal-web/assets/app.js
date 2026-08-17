@@ -1487,7 +1487,8 @@ function renderHqaDashboard() {
   const wholeCount = Number(latest.whole_product_count ?? latest.listing_count ?? 0);
   const relatedCount = Number(latest.related_listing_count ?? 0);
   const kpis = [
-    { label: 'Listing phân tích', value: formatRecordCount(wholeCount), detail: `${formatRecordCount(wholeCount)} whole-product / ${formatRecordCount(relatedCount)} liên quan`, accent: '#2F6BE4' },
+    { label: 'Listing phân tích', value: formatRecordCount(wholeCount), detail: `${formatRecordCount(wholeCount)} whole-product / ${formatRecordCount(relatedCount)} liên quan`, accent: '#2F6BE4',tooltip:
+      'Listing đủ điều kiện: Chỉ các listing được phân loại là sản phẩm hoàn chỉnh (whole_product) và được sử dụng để tính giá, số người bán, cảnh báo và gợi ý niêm yết. Linh kiện, phụ kiện, tài liệu, listing không liên quan và chưa chắc chắn không được tính.' },
     { label: 'Sản phẩm', value: formatRecordCount(latest.product_count || 0), detail: 'sản phẩm có dữ liệu hợp lệ', accent: '#7C5CFC' },
     { label: 'Người bán', value: formatRecordCount(latest.seller_count || 0), detail: 'whole-product sellers', accent: '#16A34A' },
     { label: 'Giá trung vị', value: formatDashboardCurrency(latest.median_price, latest.currency || 'USD'), detail: 'không tính parts/accessories', accent: '#475569' },
@@ -1552,7 +1553,52 @@ function renderHqaDashboard() {
       </div>
     </div>
     ${data.error ? `<div class="error">${escapeHtml(data.error)}</div>` : ''}
-    <div class="dashboard-kpi-grid">${kpis.map((item) => `<article class="dashboard-kpi-card" style="border-top-color:${item.accent}"><div class="dashboard-kpi-label">${escapeHtml(item.label)}</div><div class="dashboard-kpi-value" style="color:${item.valueColor || item.accent}">${escapeHtml(item.value)}</div><div class="dashboard-kpi-detail">${escapeHtml(item.detail)}</div></article>`).join('')}</div>
+    <div class="dashboard-kpi-grid">
+  ${kpis.map((item, index) => {
+    const hasTooltip = Boolean(item.tooltip);
+    const tooltipId = `dashboard-kpi-tooltip-${index}`;
+
+    return `
+      <article
+        class="dashboard-kpi-card ${hasTooltip ? 'dashboard-kpi-card--has-tooltip' : ''}"
+        style="border-top-color:${item.accent}"
+        ${hasTooltip ? `tabindex="0" aria-describedby="${tooltipId}"` : ''}
+      >
+        <div class="dashboard-kpi-label">
+          ${escapeHtml(item.label)}
+
+          ${hasTooltip ? `
+            <span
+              class="dashboard-kpi-info-icon"
+              aria-hidden="true"
+            >i</span>
+          ` : ''}
+        </div>
+
+        <div
+          class="dashboard-kpi-value"
+          style="color:${item.valueColor || item.accent}"
+        >
+          ${escapeHtml(item.value)}
+        </div>
+
+        <div class="dashboard-kpi-detail">
+          ${escapeHtml(item.detail)}
+        </div>
+
+        ${hasTooltip ? `
+          <div
+            id="${tooltipId}"
+            class="dashboard-kpi-tooltip"
+            role="tooltip"
+          >
+            ${escapeHtml(item.tooltip)}
+          </div>
+        ` : ''}
+      </article>
+    `;
+  }).join('')}
+</div>
 
     <section class="dashboard-panel dashboard-panel--alert">
       <div class="dashboard-panel-heading"><div class="dashboard-panel-title-wrap"><span class="dashboard-alert-dot" aria-hidden="true"></span><span class="dashboard-panel-title">Cảnh báo bất thường</span></div><span class="dashboard-panel-meta">${formatRecordCount((analysis.alerts || []).length)} cảnh báo</span></div>

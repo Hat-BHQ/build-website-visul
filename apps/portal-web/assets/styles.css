@@ -1686,6 +1686,95 @@ td small {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   min-width: 0;
 }
+/* =========================================================
+   Dashboard KPI tooltip
+   ========================================================= */
+
+.dashboard-kpi-card--has-tooltip {
+  position: relative;
+  cursor: help;
+  z-index: 1;
+}
+
+.dashboard-kpi-card--has-tooltip:hover,
+.dashboard-kpi-card--has-tooltip:focus-visible {
+  z-index: 50;
+}
+
+.dashboard-kpi-card--has-tooltip:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.dashboard-kpi-info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 5px;
+  border: 1px solid #94a3b8;
+  border-radius: 50%;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+/* Tooltip */
+.dashboard-kpi-tooltip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 10px);
+  width: 380px;
+  max-width: calc(100vw - 48px);
+  padding: 11px 13px;
+  border-radius: 9px;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.55;
+  text-align: left;
+  box-shadow:
+    0 10px 30px rgba(15, 23, 42, 0.18),
+    0 2px 6px rgba(15, 23, 42, 0.08);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease,
+    visibility 140ms ease;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.dashboard-kpi-tooltip::before {
+  content: "";
+
+  position: absolute;
+
+  top: -6px;
+  left: 28px;
+
+  width: 12px;
+  height: 12px;
+
+  background: #0f172a;
+
+  transform: rotate(45deg);
+}
+
+.dashboard-kpi-card--has-tooltip:hover .dashboard-kpi-tooltip,
+.dashboard-kpi-card--has-tooltip:focus .dashboard-kpi-tooltip,
+.dashboard-kpi-card--has-tooltip:focus-visible .dashboard-kpi-tooltip {
+  opacity: 1;
+  visibility: visible;
+
+  transform: translateY(0);
+}
 .dashboard-kpi-label {
   font-size: 12.5px;
   color: #64748b;
@@ -2142,7 +2231,11 @@ td small {
     max-width: 90vw;
   }
 }
-
+@media (max-width: 700px) {
+  .dashboard-kpi-tooltip {
+    width: min(340px, calc(100vw - 40px));
+  }
+}
 @media (max-width: 560px) {
   .dashboard-kpi-grid,
   .dashboard-mini-grid {
