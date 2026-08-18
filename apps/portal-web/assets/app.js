@@ -471,7 +471,7 @@ function buildHqaShellMarkup() {
           <h1>HQA Marketplace Reports</h1>
           <p>Quan ly, loc va xuat toan bo du lieu marketplace listings.</p>
         </div>
-        <button id="refresh-data" type="button" data-table-interaction="true">Refresh data</button>
+        <button class="hvr-float-shadow" id="refresh-data" type="button" data-table-interaction="true">Refresh data</button>
       </div>
       <div class="panel"><div id="hqa-main-tabs"></div></div>
       <div id="hqa-local-error" hidden></div>
@@ -506,8 +506,8 @@ function ensureHqaShell(content) {
 
 function hqaMainTabsView() {
   return `
-    <div class="hqa-main-tabs" role="tablist" aria-label="eBay Marketplace Reports views">
-      ${HQA_MAIN_TABS.map((tab) => `<button type="button" class="hqa-main-tab ${state.hqa.mainTab === tab.key ? 'active' : ''}" data-hqa-main-tab="${tab.key}" role="tab" aria-selected="${state.hqa.mainTab === tab.key ? 'true' : 'false'}">${escapeHtml(tab.label)}</button>`).join('')}
+    <div class="hqa-main-tabs cl-effect-5 " role="tablist" aria-label="eBay Marketplace Reports views">
+      ${HQA_MAIN_TABS.map((tab) => `<button type="button" class="hqa-main-tab ${state.hqa.mainTab === tab.key ? 'active' : ''}" data-hqa-main-tab="${tab.key}" role="tab" aria-selected="${state.hqa.mainTab === tab.key ? 'true' : 'false'}"><span data-hover="${escapeHtml(tab.label)}">${escapeHtml(tab.label)}</span></button>`).join('')}
     </div>`;
 }
 
@@ -903,8 +903,13 @@ function renderDashboardAlerts(alerts) {
     warning: { label: 'CẦN THEO DÕI', color: '#D97706' },
     info: { label: 'GHI NHẬN', color: '#2563EB' },
   };
+
   return `<div class="dashboard-alert-list dashboard-scroll">${alerts.map((alert) => {
     const severity = meta[String(alert.severity || 'info').toLowerCase()] || meta.info;
+    const severityKey = String(
+  alert.severity || 'info'
+).toLowerCase();
+
     const currency = alert.currency || 'USD';
     let metric = escapeHtml(alert.title || 'Cảnh báo');
     let detail = alert.message || '';
@@ -921,7 +926,7 @@ function renderDashboardAlerts(alerts) {
       metric = `Hết hàng ▲ ${Number(alert.change_points || 0).toFixed(0)}đ%`;
       detail = `${Number(alert.previous_out_of_stock_pct || 0).toFixed(0)}% → ${Number(alert.current_out_of_stock_pct || 0).toFixed(0)}% whole-product listing`;
     }
-    return `<button type="button" class="dashboard-alert-card" data-dashboard-alert-product="${escapeHtml(alert.product_key || alert.group || '')}" data-dashboard-alert-period="${escapeHtml(alert.period || '')}">
+    return `<button type="button" class="dashboard-alert-card dashboard-alert-card--${severityKey}" data-dashboard-alert-product="${escapeHtml(alert.product_key || alert.group || '')}" data-dashboard-alert-period="${escapeHtml(alert.period || '')}">
       <span class="dashboard-alert-sev" style="color:${severity.color}">● ${severity.label}</span>
       <span class="dashboard-alert-title">${escapeHtml(alert.product_label || alert.group || 'Sản phẩm')}</span>
       <span class="dashboard-alert-metric" style="color:${severity.color}">${escapeHtml(metric)}</span>
@@ -1536,7 +1541,7 @@ function renderHqaDashboard() {
       <div class="dashboard-section-label">Phân loại listing liên quan</div>
       <div id="dashboard-role-grid-host">${renderDashboardRoleBreakdown(current.role_counts, data.roleFilter)}</div>
       ${analyticsBody}
-      <div class="dashboard-audit-panel"><div class="dashboard-section-label-row"><span class="dashboard-section-label">Listings liên quan — classification audit</span><button type="button" class="dashboard-audit-export" data-dashboard-export="audit">Xuất role audit CSV</button></div><div class="dashboard-audit-sub">Bảng giúp Marketing thấy vì sao listing được tính hoặc bị loại.</div><div id="dashboard-audit-host">${renderDashboardAuditTable((analysis.related_listings || {})[selectedProduct] || [], selectedPeriod, data.roleFilter)}</div></div>
+      <div class="dashboard-audit-panel"><div class="dashboard-section-label-row"><span class="dashboard-section-label">Listings liên quan — classification audit</span><button type="button" class="dashboard-audit-export hvr-float-shadow" data-dashboard-export="audit">Xuất role audit CSV</button></div><div class="dashboard-audit-sub">Bảng giúp Marketing thấy vì sao listing được tính hoặc bị loại.</div><div id="dashboard-audit-host">${renderDashboardAuditTable((analysis.related_listings || {})[selectedProduct] || [], selectedPeriod, data.roleFilter)}</div></div>
     `;
   }
 
@@ -1547,9 +1552,9 @@ function renderHqaDashboard() {
         <label><span>Kỳ</span><select id="dashboard-granularity"><option value="month" ${granularity === 'month' ? 'selected' : ''}>Tháng</option><option value="week" ${granularity === 'week' ? 'selected' : ''}>Tuần</option></select></label>
       </div>
       <div class="dashboard-export-actions" aria-label="Xuất dữ liệu Dashboard">
-        <button type="button" data-dashboard-export="group_period">Tổng hợp CSV</button>
-        <button type="button" data-dashboard-export="alerts">Cảnh báo CSV</button>
-        <button type="button" data-dashboard-export="top_sellers" ${current?.top_sellers?.length ? '' : 'disabled'}>Top 10 CSV</button>
+        <button class="hvr-float-shadow" type="button" data-dashboard-export="group_period">Tổng hợp CSV</button>
+        <button class="hvr-float-shadow" type="button" data-dashboard-export="alerts">Cảnh báo CSV</button>
+        <button class="hvr-float-shadow" type="button" data-dashboard-export="top_sellers" ${current?.top_sellers?.length ? '' : 'disabled'}>Top 10 CSV</button>
       </div>
     </div>
     ${data.error ? `<div class="error">${escapeHtml(data.error)}</div>` : ''}
@@ -2766,10 +2771,10 @@ function renderHqaFilterOptions() {
       <label class="filter-field filter-field--price"><span class="filter-field__label">Sort by Price</span><select id="sort-price" aria-label="Sort by price"><option value="default" ${filters.priceSort === 'default' ? 'selected' : ''}>Default</option><option value="price_asc" ${filters.priceSort === 'price_asc' ? 'selected' : ''}>Price: Low to High</option><option value="price_desc" ${filters.priceSort === 'price_desc' ? 'selected' : ''}>Price: High to Low</option></select></label>
       <label class="filter-field filter-field--search"><span class="filter-field__label">Search</span><input id="search" placeholder="Search listing title, listing ID, seller" value="${escapeHtml(filters.search)}"></label>
       <div class="filter-actions">
-        <button type="submit">Apply filters</button>
-        <button id="reset-filters" type="button" data-table-interaction="true">Reset filters</button>
-        <button id="refresh-inline" type="button" data-table-interaction="true">Refresh data</button>
-        <button id="export-all-listings" type="button" data-table-interaction="true" ${state.hqa.allListings.isExporting ? 'disabled' : ''}>${state.hqa.allListings.isExporting ? 'Dang xuat...' : 'Export CSV'}</button>
+        <button class="hvr-float-shadow" type="submit">Apply filters</button>
+        <button class="hvr-float-shadow" id="reset-filters" type="button" data-table-interaction="true">Reset filters</button>
+        <button class="hvr-float-shadow" id="refresh-inline" type="button" data-table-interaction="true">Refresh data</button>
+        <button class="hvr-float-shadow" id="export-all-listings" type="button" data-table-interaction="true" ${state.hqa.allListings.isExporting ? 'disabled' : ''}>${state.hqa.allListings.isExporting ? 'Dang xuat...' : 'Export CSV'}</button>
       </div>
       ${state.hqa.allListings.optionsError ? `<div class="error">${escapeHtml(state.hqa.allListings.optionsError)}</div>` : ''}
     </form>`;
@@ -2955,7 +2960,7 @@ function renderLogin(error = '') {
   app.innerHTML = `
     <main class="login-shell">
       <form class="login-card" id="login-form">
-        <div class="brand-mark">HQ</div>
+        <div class="brand-mark"> <img src="/assets/login-logo.svg" alt="TOM Login" class="login-logo-image"></div>
         <h1>Hệ thống</h1>
         <p>Sign in to access assigned modules.</p>
         <label>Email<input id="email" value="" type="email" autocomplete="username" required></label>
@@ -2984,7 +2989,7 @@ function renderLogin(error = '') {
 function sidebarButton(code, label) {
   if (code !== 'SYSTEM' && !hasModule(code)) return '';
   if (code === 'SYSTEM' && state.user.system_role !== 'superadmin') return '';
-  return `<button data-module="${code}" class="${state.currentModule === code ? 'active' : ''}">${label}</button>`;
+  return `<button data-module="${code}" class="${state.currentModule === code ? 'active' : ''}"><span>${label}</span></button>`;
 }
 
 function renderShell() {
@@ -2994,7 +2999,9 @@ function renderShell() {
   app.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="logo">HQ</div>
+        <div class="logo">
+        <img src="/assets/logo.svg" alt="TOM Logo" class="logo-image">
+        </div>
         <nav>
           ${sidebarButton('HQA', 'HQA')}
           ${sidebarButton('HQS', 'HQS')}
@@ -3003,7 +3010,7 @@ function renderShell() {
         <div class="sidebar-user">
           <strong>${escapeHtml(state.user.full_name)}</strong>
           <span>${escapeHtml(state.user.system_role || state.modules.map((m) => `${m.code}:${m.role}`).join(', '))}</span>
-          <button id="logout">Sign out</button>
+          <button id="logout"><span>Sign out </span></button>
         </div>
       </aside>
       <main class="content" id="content"></main>
