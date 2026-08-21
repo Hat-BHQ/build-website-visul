@@ -210,7 +210,7 @@ const REPORT_META = {
 const HQA_MAIN_TABS = [
   { key: 'all_listings', label: 'All Listings' },
   { key: 'dashboard', label: 'Dashboard' },
-  { key: 'data_check', label: 'Kiem tra du lieu' },
+  { key: 'data_check', label: 'Kiểm tra dữ liệu' },
 ];
 const PAGE_SIZE_OPTIONS = [30, 50, 100, 200];
 const ALL_LISTINGS_BASE_OPTION_FIELDS = {
@@ -1497,7 +1497,7 @@ function renderHqaDashboard() {
     { label: 'Sản phẩm', value: formatRecordCount(latest.product_count || 0), detail: 'sản phẩm có dữ liệu hợp lệ', accent: '#7C5CFC' },
     { label: 'Người bán', value: formatRecordCount(latest.seller_count || 0), detail: 'whole-product sellers', accent: '#16A34A' },
     { label: 'Giá trung vị', value: formatDashboardCurrency(latest.median_price, latest.currency || 'USD'), detail: 'không tính parts/accessories', accent: '#475569' },
-    { label: 'Hết hàng', value: formatRecordCount(latest.out_of_stock_count || 0), detail: `${Number(latest.out_of_stock_pct || 0).toFixed(1)}% whole-product listing`, accent: '#F59E0B', valueColor: '#EF4444' },
+    { label: 'Hết hàng', value: formatRecordCount(latest.out_of_stock_count || 0), detail: `${Number(latest.out_of_stock_pct || 0).toFixed(1)}% whole-product listing`, accent: '#EF4444', valueColor: '#EF4444' },
   ];
 
   const productLabel = productInfo?.product_label || selectedProduct || 'Sản phẩm';
