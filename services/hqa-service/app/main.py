@@ -9,6 +9,13 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.keyword_catalog import load_keyword_catalog
+from app.keyword_seller_analytics import build_export_rows, build_keyword_payload
+from app.keyword_seller_source import (
+    SOURCE_NONE,
+    fetch_keyword_observations,
+    fetch_keyword_options,
+    resolve_source,
+)
 from app.report_config import REPORT_GROUPS_BY_KEY, get_keyword_metadata
 from app.security import require_permission
 from app.service import (
@@ -1480,6 +1487,146 @@ def marketplace_dashboard_export_csv(
     else:
         raise HTTPException(status_code=400, detail="Invalid dataset")
     return _to_csv_response(f"hqa_dashboard_{dataset}.csv", rows)
+
+
+# ---------------------------------------------------------------------------
+# Keyword -> Seller -> Latest listing -> Price/Status history
+#
+# Toan bo business logic nam o `keyword_seller_analytics` (pure functions);
+# tang truy cap DB nam o `keyword_seller_source` va tu do duoc bang phang hay
+# schema chuan hoa dang ton tai tren database.
+# ---------------------------------------------------------------------------
+
+
+def _keyword_seller_source(db: Session) -> str:
+    source = resolve_source(db, settings.hqa_keyword_seller_source)
+    if source == SOURCE_NONE:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Khong tim thay bang listing nao tren database "
+                "(public.marketplace_research_results hoac {ebay,etsy,reverb}.listings)."
+            ),
+        )
+    return source
+
+
+def _keyword_seller_payload(
+    db: Session,
+    *,
+    keyword: str,
+    marketplaces: list[str] | None,
+    date_from: date | None,
+    date_to: date | None,
+    min_price: float | None,
+    include_all_roles: bool,
+) -> dict:
+    source = _keyword_seller_source(db)
+    observations = fetch_keyword_observations(
+        db,
+        keyword=keyword,
+        source=source,
+        marketplaces=marketplaces,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    threshold = settings.hqa_keyword_seller_min_price if min_price is None else min_price
+    payload = build_keyword_payload(
+        observations,
+        keyword=keyword,
+        min_price=threshold,
+        price_drop_warning_pct=settings.hqa_keyword_seller_price_drop_warning_pct,
+        price_drop_critical_pct=settings.hqa_keyword_seller_price_drop_critical_pct,
+        multiple_active_threshold=settings.hqa_keyword_seller_multiple_active_threshold,
+        include_all_roles=include_all_roles,
+    )
+    payload["source"] = source
+    payload["min_price"] = threshold
+    return payload
+
+
+@app.get("/internal/v1/hqa/keyword-seller/keywords")
+def hqa_keyword_seller_keywords(
+    request: Request,
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    """Danh sach keyword cho selector, kem so seller / listing / median."""
+    source = _keyword_seller_source(db)
+    try:
+        items = fetch_keyword_options(
+            db,
+            source=source,
+            marketplaces=_get_query_list(request, "marketplace", "marketplaces"),
+            date_from=date_from,
+            date_to=date_to,
+            min_price=settings.hqa_keyword_seller_min_price if min_price is None else min_price,
+            limit=limit or settings.hqa_keyword_seller_keyword_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": items, "total": len(items), "source": source}
+
+
+@app.get("/internal/v1/hqa/keyword-seller/analytics")
+def hqa_keyword_seller_analytics(
+    request: Request,
+    keyword: str = Query(..., min_length=1),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    include_all_roles: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    """Payload day du cua 1 keyword: KPI, seller series, bang, alert, audit."""
+    try:
+        return _keyword_seller_payload(
+            db,
+            keyword=keyword,
+            marketplaces=_get_query_list(request, "marketplace", "marketplaces"),
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            include_all_roles=include_all_roles,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/v1/hqa/keyword-seller/export")
+def hqa_keyword_seller_export(
+    request: Request,
+    keyword: str = Query(..., min_length=1),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    min_price: float | None = Query(default=None, ge=0),
+    include_all_roles: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    try:
+        payload = _keyword_seller_payload(
+            db,
+            keyword=keyword,
+            marketplaces=_get_query_list(request, "marketplace", "marketplaces"),
+            date_from=date_from,
+            date_to=date_to,
+            min_price=min_price,
+            include_all_roles=include_all_roles,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rows = build_export_rows(payload)
+    if not rows:
+        raise HTTPException(status_code=404, detail="No data available for export")
+    safe_keyword = "".join(ch if ch.isalnum() else "_" for ch in keyword)[:40]
+    return _to_csv_response(f"hqa_keyword_seller_{safe_keyword}.csv", rows, include_bom=True)
 
 
 @app.post("/internal/v1/listings/bulk-upsert")

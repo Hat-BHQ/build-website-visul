@@ -18,6 +18,18 @@ class Settings(BaseSettings):
     hqa_out_of_stock_min_count: int = 10
     hqa_out_of_stock_alert_percent: float = 30.0
     hqa_out_of_stock_baseline_days: int = 7
+
+    # --- Keyword x Seller latest-listing analytics ---------------------------
+    # Nguon du lieu: auto | flat | normalized.
+    #   flat       -> public.marketplace_research_results
+    #   normalized -> {ebay,etsy,reverb}.listings + listing_snapshots
+    hqa_keyword_seller_source: str = "auto"
+    hqa_keyword_seller_min_price: float = 500.0
+    hqa_keyword_seller_price_drop_warning_pct: float = 20.0
+    hqa_keyword_seller_price_drop_critical_pct: float = 30.0
+    hqa_keyword_seller_multiple_active_threshold: int = 2
+    hqa_keyword_seller_keyword_limit: int = 200
+
     model_config = SettingsConfigDict(case_sensitive=False)
 
 

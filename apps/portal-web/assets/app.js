@@ -531,12 +531,32 @@ function renderHqaMainTabVisibility() {
   if (!standardView || !dashboardView || !dataCheckView) return;
   const isDashboard = state.hqa.mainTab === 'dashboard';
   const isDataCheck = state.hqa.mainTab === 'data_check';
-  standardView.hidden = isDashboard;
-  if (isDataCheck) {
-    standardView.hidden = true;
-  }
+  standardView.hidden = isDashboard || isDataCheck;
   dashboardView.hidden = !isDashboard;
   dataCheckView.hidden = !isDataCheck;
+}
+
+// ---------------------------------------------------------------------------
+// Keyword x Seller analytics tab.
+// Toan bo logic/markup nam trong module doc lap assets/keyword-seller-analytics.js;
+// app.js chi chiu trach nhiem mount va bao loi khi module chua duoc nap.
+// ---------------------------------------------------------------------------
+// Tab Dashboard cua HQA duoc thay bang module Keyword -> Seller -> Latest listing.
+// Toan bo markup/logic nam trong assets/keyword-seller-analytics.js; app.js chi
+// mount, cap ham goi API (co san Authorization + auto refresh token) va bao loi.
+async function renderHqaKeywordSeller({ reload = false } = {}) {
+  const host = document.getElementById('hqa-dashboard-view');
+  if (!host) return;
+  const analytics = typeof window !== 'undefined' ? window.KeywordSellerAnalytics : null;
+  if (!analytics) {
+    host.innerHTML = '<div class="error">Không tải được module Dashboard. Vui lòng tải lại trang.</div>';
+    return;
+  }
+  await analytics.mount(host, {
+    reload,
+    // Module dung duong dan day du /api/v1/...; api() da tu them tien to nay.
+    apiClient: (path) => api(path.replace(/^\/api\/v1/, '')),
+  });
 }
 
 function appendDashboardArrayParams(params, key, values) {
@@ -3371,11 +3391,7 @@ async function renderHqa(content, options = {}) {
   renderAllListingsToast();
 
   if (state.hqa.mainTab === 'dashboard') {
-    syncDashboardFiltersFromAllListings();
-    if (reloadData || !state.hqa.dashboard.analysis) {
-      await loadHqaDashboardData();
-    }
-    renderHqaDashboard();
+    await renderHqaKeywordSeller({ reload: reloadData });
   } else if (state.hqa.mainTab === 'data_check') {
     renderDataCheckView();
   } else {
@@ -3410,9 +3426,7 @@ async function renderHqa(content, options = {}) {
     refreshDataButton.dataset.bound = 'true';
     refreshDataButton.addEventListener('click', async () => {
       if (state.hqa.mainTab === 'dashboard') {
-        syncDashboardFiltersFromAllListings();
-        await loadHqaDashboardData();
-        renderHqaDashboard();
+        await renderHqaKeywordSeller({ reload: true });
         return;
       }
 
