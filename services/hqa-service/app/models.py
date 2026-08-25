@@ -21,6 +21,7 @@ marketplace_research_results = Table(
     Column("quantity", Integer, nullable=True),
     Column("count", Integer, nullable=True),
     Column("listing_status", String(32), nullable=True),
+    Column("keyword", Text, nullable=True),
     Column("brand", Text, nullable=True),
     Column("model", Text, nullable=True),
     Column("listing_location", Text, nullable=True),

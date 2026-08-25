@@ -186,6 +186,9 @@ services:
       # Không sử dụng hoặc tạo dữ liệu demo.
       DEMO_DATA_ENABLED: ${DEMO_DATA_ENABLED:-false}
 
+    # Keyword / Seller analytics: chỉ dùng keyword thực từ DB normalized.
+      HQA_KEYWORD_SELLER_SOURCE: ${HQA_KEYWORD_SELLER_SOURCE:-normalized}
+      HQA_KEYWORD_SELLER_KEYWORD_LIMIT: ${HQA_KEYWORD_SELLER_KEYWORD_LIMIT:-500}
     healthcheck:
       test:
         [

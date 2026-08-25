@@ -340,10 +340,10 @@ _FLAT_SELECT = """
         r.category_name                            AS category_name,
         r.brand                                    AS brand,
         r.model                                    AS model,
+        r.keyword                               AS keyword,
         COALESCE(r.exclude_flag, false)            AS exclude_flag
     FROM public.marketplace_research_results r
 """
-
 
 def _fetch_flat(
     db: Session,
@@ -353,50 +353,90 @@ def _fetch_flat(
     date_from: date | None,
     date_to: date | None,
 ) -> list[dict]:
-    # Bang phang khong co cot keyword -> khop theo title/listing_id giong
-    # `_apply_dashboard_base_filters` cua service.py de dong nhat hanh vi.
     sql = _FLAT_SELECT + """
-        WHERE (
-            r.listing_title ILIKE :pattern
-            OR r.listing_id ILIKE :pattern
-        )
-        AND btrim(COALESCE(r.seller_or_shop, '')) <> ''
-        AND r.research_date IS NOT NULL
+        WHERE lower(btrim(COALESCE(r.keyword, ''))) = :keyword
+          AND btrim(COALESCE(r.seller_or_shop, '')) <> ''
+          AND r.research_date IS NOT NULL
     """
-    params: dict = {"pattern": f"%{keyword.strip()}%"}
+
+    # QUAN TRỌNG:
+    # SQL phía trên dùng :keyword nên params bắt buộc phải có "keyword".
+    params: dict = {
+        "keyword": keyword.strip().lower(),
+    }
+
     if marketplaces:
-        cleaned = [m.strip().lower() for m in marketplaces if m and m.strip()]
+        cleaned = [
+            m.strip().lower()
+            for m in marketplaces
+            if m and m.strip()
+        ]
+
         if cleaned:
-            sql += " AND lower(btrim(COALESCE(r.marketplace, ''))) = ANY(:marketplaces)"
+            sql += """
+                AND lower(btrim(COALESCE(r.marketplace, '')))
+                    = ANY(:marketplaces)
+            """
             params["marketplaces"] = cleaned
+
     if date_from:
         sql += " AND r.research_date >= :date_from"
         params["date_from"] = date_from
+
     if date_to:
         sql += " AND r.research_date <= :date_to"
         params["date_to"] = date_to
-    sql += " ORDER BY r.research_date ASC"
 
-    rows = db.execute(text(sql), params).mappings().all()
+    sql += """
+        ORDER BY
+            r.research_date ASC,
+            r.collected_at ASC NULLS LAST,
+            r.updated_at ASC NULLS LAST
+    """
 
-    # first_seen suy ra tu chinh chuoi quan sat (bang phang khong luu first_seen_at).
+    rows = db.execute(
+        text(sql),
+        params,
+    ).mappings().all()
+
+    # Suy ra first_seen từ lần xuất hiện đầu tiên của listing.
     first_seen: dict[tuple[str, str], date] = {}
+
     for row in rows:
-        key = (_clean(row.get("marketplace")).lower(), _clean(row.get("listing_id")))
+        key = (
+            _clean(row.get("marketplace")).lower(),
+            _clean(row.get("listing_id")),
+        )
+
         observed = _as_date(row.get("observed_date"))
+
         if observed is None:
             continue
+
         if key not in first_seen or observed < first_seen[key]:
             first_seen[key] = observed
 
     observations = []
+
     for row in rows:
         payload = dict(row)
-        key = (_clean(row.get("marketplace")).lower(), _clean(row.get("listing_id")))
-        payload["first_seen"] = first_seen.get(key)
-        observations.append(_row_to_observation(payload, marketplace=row.get("marketplace"), keyword=keyword))
-    return observations
 
+        key = (
+            _clean(row.get("marketplace")).lower(),
+            _clean(row.get("listing_id")),
+        )
+
+        payload["first_seen"] = first_seen.get(key)
+
+        observations.append(
+            _row_to_observation(
+                payload,
+                marketplace=row.get("marketplace"),
+                keyword=keyword,
+            )
+        )
+
+    return observations
 
 def _fetch_flat_keywords(
     db: Session,
@@ -407,61 +447,66 @@ def _fetch_flat_keywords(
     min_price: float,
     limit: int,
 ) -> list[dict]:
-    """Bang phang khong co cot keyword -> lay tu keyword catalog cua he thong."""
-    from app.keyword_catalog import load_keyword_catalog
+    sql = """
+        SELECT
+            btrim(r.keyword) AS keyword,
+            COUNT(DISTINCT r.seller_or_shop) AS seller_count,
+            COUNT(DISTINCT r.listing_id) AS listing_count,
+            percentile_cont(0.5)
+                WITHIN GROUP (ORDER BY r.price) AS median_price
+        FROM public.marketplace_research_results r
+        WHERE r.keyword IS NOT NULL
+          AND btrim(r.keyword) <> ''
+          AND r.price IS NOT NULL
+          AND r.price > :min_price
+          AND btrim(COALESCE(r.seller_or_shop, '')) <> ''
+    """
 
-    try:
-        catalog = load_keyword_catalog()
-    except Exception:  # pragma: no cover - catalog loi thi tra ve rong
-        logger.exception("keyword catalog unavailable for keyword-seller module")
-        return []
+    params = {
+        "min_price": min_price,
+        "limit": limit,
+    }
 
-    entries = catalog.get("entries") or []
-    results: list[dict] = []
-    for entry in entries:
-        keyword_value = getattr(entry, "keyword", None) or (entry.get("keyword") if isinstance(entry, dict) else None)
-        if not keyword_value:
-            continue
-        sql = """
-            SELECT
-                COUNT(DISTINCT r.seller_or_shop) AS seller_count,
-                COUNT(DISTINCT r.listing_id)     AS listing_count,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY r.price) AS median_price
-            FROM public.marketplace_research_results r
-            WHERE r.listing_title ILIKE :pattern
-              AND r.price IS NOT NULL AND r.price > :min_price
-              AND btrim(COALESCE(r.seller_or_shop, '')) <> ''
-        """
-        params: dict = {"pattern": f"%{keyword_value}%", "min_price": min_price}
-        if marketplaces:
-            cleaned = [m.strip().lower() for m in marketplaces if m and m.strip()]
-            if cleaned:
-                sql += " AND lower(btrim(COALESCE(r.marketplace, ''))) = ANY(:marketplaces)"
-                params["marketplaces"] = cleaned
-        if date_from:
-            sql += " AND r.research_date >= :date_from"
-            params["date_from"] = date_from
-        if date_to:
-            sql += " AND r.research_date <= :date_to"
-            params["date_to"] = date_to
+    if marketplaces:
+        cleaned = [
+            m.strip().lower()
+            for m in marketplaces
+            if m and m.strip()
+        ]
+        if cleaned:
+            sql += """
+                AND lower(btrim(COALESCE(r.marketplace, '')))
+                    = ANY(:marketplaces)
+            """
+            params["marketplaces"] = cleaned
 
-        row = db.execute(text(sql), params).mappings().first()
-        listing_count = int((row or {}).get("listing_count") or 0)
-        if listing_count <= 0:
-            continue
-        results.append(
-            {
-                "keyword": keyword_value,
-                "seller_count": int((row or {}).get("seller_count") or 0),
-                "listing_count": listing_count,
-                "median_price": _as_float((row or {}).get("median_price")),
-            }
-        )
+    if date_from:
+        sql += " AND r.research_date >= :date_from"
+        params["date_from"] = date_from
 
-    results.sort(key=lambda item: (-item["listing_count"], item["keyword"].lower()))
-    return results[:limit]
+    if date_to:
+        sql += " AND r.research_date <= :date_to"
+        params["date_to"] = date_to
 
+    sql += """
+        GROUP BY btrim(r.keyword)
+        HAVING COUNT(DISTINCT r.listing_id) > 0
+        ORDER BY COUNT(DISTINCT r.listing_id) DESC,
+                 btrim(r.keyword) ASC
+        LIMIT :limit
+    """
 
+    rows = db.execute(text(sql), params).mappings().all()
+
+    return [
+        {
+            "keyword": _clean(row.get("keyword")),
+            "seller_count": int(row.get("seller_count") or 0),
+            "listing_count": int(row.get("listing_count") or 0),
+            "median_price": _as_float(row.get("median_price")),
+        }
+        for row in rows
+    ]
 # ---------------------------------------------------------------------------
 # 5. API cong khai cua module
 # ---------------------------------------------------------------------------
