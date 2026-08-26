@@ -34,10 +34,21 @@ QUAN TRONG VE KEYWORD MATCH:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
 from statistics import median
 
-from app.listing_matcher import match_listing
+from app.listing_matcher import (
+    FILTER_MODE_BRAND_MODEL,
+    FILTER_MODE_KEYWORD,
+    FILTER_MODES,
+    PLURALIZABLE_PRODUCT_TERMS,
+    alnum_runs,
+    keyword_phrase_variants,
+    match_keyword_strict,
+    match_listing_by_mode,
+    normalize_text,
+)
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -192,52 +203,245 @@ def _normalize_status(value) -> str:
     return normalized.upper()
 
 
-def _row_matches_keyword(
-    row,
-    *,
-    keyword: str,
-) -> bool:
-    """Kiem tra listing title bang matcher dung chung.
+# ---------------------------------------------------------------------------
+# 2b. Filter scope (2 mode loai tru nhau)
+# ---------------------------------------------------------------------------
 
-    Luu y:
-    - ``role='all'`` duoc dung co chu dich tai tang source.
-      Source chi lam nhiem vu keyword matching, KHONG loai component/accessory
-      theo role tai day. Role se tiep tuc duoc xu ly o tang classifier/analytics.
-    - Neu row co brand/model thi matcher se check exact brand/model.
-    - ``exclude_flag`` trong DB luon duoc ton trong.
+
+@dataclass(frozen=True)
+class FilterScope:
+    """Pham vi loc cua dashboard tai MOT thoi diem.
+
+    Chi mot trong hai nhom gia tri duoc mang y nghia:
+    - ``brand`` / ``model`` khi ``filter_mode == "brand_model"``
+    - ``keyword``           khi ``filter_mode == "keyword"``
+
+    ``build_scope`` da xoa sach gia tri cua mode con lai nen khong the co
+    "hidden stale filter" ro ri xuong SQL.
+    """
+
+    filter_mode: str
+    brand: str = ""
+    model: str = ""
+    keyword: str = ""
+    condition: str = ""
+
+    @property
+    def is_brand_model(self) -> bool:
+        return self.filter_mode == FILTER_MODE_BRAND_MODEL
+
+    @property
+    def is_keyword(self) -> bool:
+        return self.filter_mode == FILTER_MODE_KEYWORD
+
+    @property
+    def label(self) -> str:
+        """Nhan hien thi cho card / CSV / tieu de."""
+        if self.is_keyword:
+            return self.keyword
+        return " ".join(part for part in (self.brand, self.model) if part)
+
+
+def build_scope(
+    *,
+    filter_mode: str | None,
+    brand: str | None = None,
+    model: str | None = None,
+    keyword: str | None = None,
+    condition: str | None = None,
+) -> FilterScope:
+    """Chuan hoa + validate scope. Raise ``ValueError`` neu khong hop le."""
+    mode = _clean(filter_mode).lower() or FILTER_MODE_BRAND_MODEL
+
+    if mode not in FILTER_MODES:
+        raise ValueError(
+            f"filter_mode phai la mot trong {list(FILTER_MODES)}"
+        )
+
+    normalized_condition = _clean(condition)
+
+    if mode == FILTER_MODE_BRAND_MODEL:
+        normalized_brand = _clean(brand)
+        normalized_model = _clean(model)
+
+        if not normalized_brand and not normalized_model:
+            raise ValueError(
+                "Mode brand_model yeu cau it nhat mot trong brand hoac model."
+            )
+
+        # Keyword cua mode kia bi xoa hoan toan.
+        return FilterScope(
+            filter_mode=mode,
+            brand=normalized_brand,
+            model=normalized_model,
+            keyword="",
+            condition=normalized_condition,
+        )
+
+    normalized_keyword = _clean(keyword)
+
+    if not normalized_keyword:
+        raise ValueError("Mode keyword yeu cau keyword.")
+
+    # Brand/Model cua mode kia bi xoa hoan toan.
+    return FilterScope(
+        filter_mode=mode,
+        brand="",
+        model="",
+        keyword=normalized_keyword,
+        condition=normalized_condition,
+    )
+
+
+def _row_matches_scope(
+    row,
+    scope: FilterScope,
+) -> bool:
+    """Quyet dinh cuoi cung: listing title co thuoc scope hay khong.
+
+    SQL chi lam nhiem vu thu hep candidate. Ham nay moi la nguon su that:
+    - Mode A -> ``match_brand_model_title`` (boundary phrase).
+    - Mode B -> ``match_keyword_strict``    (equality + plural cho phep).
+
+    ``exclude_flag`` trong DB luon duoc ton trong.
     """
     if bool(row.get("exclude_flag")):
         return False
 
     title = _clean(row.get("listing_title"))
-    normalized_keyword = _clean(keyword)
 
-    if not title or not normalized_keyword:
+    if not title:
         return False
 
-    brand = _clean(row.get("brand")) or None
-    model = _clean(row.get("model")) or None
-
     try:
-        result = match_listing(
-            title=title,
-            keyword=normalized_keyword,
-            brand=brand,
-            model=model,
-            role="all",
-            exclude_keywords=None,
+        return bool(
+            match_listing_by_mode(
+                title=title,
+                filter_mode=scope.filter_mode,
+                brand=scope.brand or None,
+                model=scope.model or None,
+                keyword=scope.keyword or None,
+            )
         )
     except Exception:
         logger.exception(
-            "listing_matcher failed: keyword=%r title=%r brand=%r model=%r",
-            normalized_keyword,
+            "listing_matcher failed: scope=%r title=%r",
+            scope,
             title,
-            brand,
-            model,
         )
         return False
 
-    return bool(result.matched)
+
+def _row_matches_keyword(
+    row,
+    *,
+    keyword: str,
+) -> bool:
+    """Backward-compatible wrapper: mode keyword STRICT."""
+    normalized_keyword = _clean(keyword)
+
+    if not normalized_keyword:
+        return False
+
+    return _row_matches_scope(
+        row,
+        FilterScope(
+            filter_mode=FILTER_MODE_KEYWORD,
+            keyword=normalized_keyword,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2c. SQL prefilter cua scope
+# ---------------------------------------------------------------------------
+#
+# QUAN TRONG: SQL o day chi de GIAM CANDIDATE.
+# Moi predicate phai la SIEU TAP (superset) cua ket qua matcher that su,
+# neu khong se loai nham listing hop le truoc khi matcher kip chay.
+
+
+def _scope_title_tokens(scope: FilterScope) -> list[str]:
+    """Token bat buoc xuat hien trong title, dung cho ILIKE prefilter.
+
+    - Mode A: token cua brand + token cua model.
+    - Mode B: token cua keyword, final product noun duoc dua ve dang so it
+      de ILIKE bat duoc ca "speaker" lan "speakers".
+    """
+    if scope.is_brand_model:
+        source_terms = [scope.brand, scope.model]
+    else:
+        source_terms = [scope.keyword]
+
+    tokens: list[str] = []
+
+    for term in source_terms:
+        normalized = normalize_text(term)
+
+        if not normalized:
+            continue
+
+        tokens.extend(normalized.split())
+
+    if not tokens:
+        return []
+
+    # Chi ha "s" o token CUOI CUNG va chi khi no la product noun.
+    last = tokens[-1]
+    singular = last[:-1] if last.endswith("s") else last
+
+    if singular in PLURALIZABLE_PRODUCT_TERMS:
+        tokens[-1] = singular
+
+    # QUAN TRONG: tach tiep thanh cac cum chu/so.
+    # Keyword "GX4000D" phai bat duoc title "Akai GX-4000D", nen KHONG duoc
+    # ILIKE '%gx4000d%' (title co dau gach o giua). Tach thanh 'gx' + '4000'
+    # thi predicate van la superset cua matcher va khong loai nham.
+    runs: list[str] = []
+
+    for token in tokens:
+        # Bo run 1 ky tu: gan nhu khong loc duoc gi ma lai ton chi phi.
+        # Bo bot predicate chi lam tap ket qua RONG hon -> van la superset.
+        runs.extend(
+            run for run in alnum_runs(token) if len(run) >= 2
+        )
+
+    # Bo trung lap, giu thu tu.
+    return list(dict.fromkeys(run for run in runs if run))
+
+
+def _scope_sql_filter(
+    scope: FilterScope,
+    *,
+    title_column: str,
+    condition_column: str | None,
+    params: dict,
+) -> str:
+    """Sinh doan SQL prefilter cho scope va nap params tuong ung."""
+    fragments: list[str] = []
+
+    for index, token in enumerate(_scope_title_tokens(scope)):
+        placeholder = f"scope_token_{index}"
+        fragments.append(
+            f"""
+            AND {title_column} ILIKE :{placeholder}
+            """
+        )
+        params[placeholder] = f"%{token}%"
+
+    if scope.condition and condition_column:
+        fragments.append(
+            f"""
+            AND lower(
+                btrim(
+                    COALESCE({condition_column}, '')
+                )
+            ) = :scope_condition
+            """
+        )
+        params["scope_condition"] = scope.condition.lower()
+
+    return "".join(fragments)
 
 
 def _row_to_observation(
@@ -270,18 +474,10 @@ def _row_to_observation(
     }
 
 
-def _build_keyword_option_rows(
-    rows,
-    *,
-    limit: int,
-) -> list[dict]:
-    """Group candidate rows thanh keyword options sau khi da qua matcher.
-
-    Seller/listing count dung DISTINCT.
-    Median price giu semantics gan voi SQL cu: tinh tren cac observation
-    hop le trong khoang thoi gian duoc chon.
-    """
-    grouped: dict[str, dict] = {}
+def _keyword_vocabulary(rows) -> list[str]:
+    """Danh sach keyword co that tren DB, lay tu chinh cot ``keyword``."""
+    vocabulary: list[str] = []
+    seen: set[str] = set()
 
     for row in rows:
         keyword = _clean(row.get("keyword"))
@@ -289,30 +485,124 @@ def _build_keyword_option_rows(
         if not keyword:
             continue
 
-        if not _row_matches_keyword(row, keyword=keyword):
+        key = keyword.lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        vocabulary.append(keyword)
+
+    return vocabulary
+
+
+def _keyword_first_token_index(vocabulary: list[str]) -> dict[str, list[str]]:
+    """Index keyword theo token DAU TIEN cua tung variant.
+
+    Mot title chi co the chua cum keyword neu no chua token dau tien cua cum,
+    nen index nay cho phep bo qua phan lon keyword ma khong doi ket qua.
+    Nho vay khong phai chay matcher cho moi cap (row x keyword).
+    """
+    index: dict[str, list[str]] = {}
+
+    for keyword in vocabulary:
+        for variant in keyword_phrase_variants(keyword):
+            variant_runs = alnum_runs(variant)
+
+            if not variant_runs:
+                continue
+
+            # Index theo RUN dau tien (khong phai tu dau tien), de keyword
+            # "GX4000D" va title "GX-4000D" cung roi vao khoa "gx".
+            first_run = variant_runs[0]
+
+            bucket = index.setdefault(first_run, [])
+
+            if keyword not in bucket:
+                bucket.append(keyword)
+
+    return index
+
+
+def _build_keyword_option_rows(
+    rows,
+    *,
+    limit: int,
+) -> list[dict]:
+    """Group candidate rows thanh keyword options sau khi da qua matcher.
+
+    QUAN TRONG (prompt muc XXIV):
+    Card KHONG duoc gom theo cot ``keyword`` cua tung row, vi cot do co the
+    thieu hoac lech so voi title. Neu gom theo cot, card se dem it hon detail
+    (detail match theo title) va sinh ra dung loi "card 6 / detail 7".
+
+    Vi vay:
+    - Vocabulary keyword lay tu cot ``keyword`` (nguon keyword co that tren DB).
+    - Nhung viec MOT ROW co thuoc keyword nao lai do ``match_keyword_strict``
+      tren TITLE quyet dinh, y het detail.
+
+    Seller/listing count dung DISTINCT.
+    """
+    rows = list(rows)
+    vocabulary = _keyword_vocabulary(rows)
+
+    if not vocabulary:
+        return []
+
+    index = _keyword_first_token_index(vocabulary)
+    grouped: dict[str, dict] = {}
+
+    for row in rows:
+        if bool(row.get("exclude_flag")):
+            continue
+
+        normalized_title = normalize_text(_clean(row.get("listing_title")))
+
+        if not normalized_title:
+            continue
+
+        candidates: list[str] = []
+        seen_candidates: set[str] = set()
+
+        for token in set(alnum_runs(normalized_title)):
+            for keyword in index.get(token, ()):
+                key = keyword.lower()
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                candidates.append(keyword)
+
+        matched_keywords = [
+            keyword
+            for keyword in candidates
+            if match_keyword_strict(normalized_title, keyword)
+        ]
+
+        if not matched_keywords:
             continue
 
         seller = _clean(row.get("seller"))
         listing_id = _clean(row.get("listing_id"))
         price = _as_float(row.get("price"))
 
-        bucket = grouped.setdefault(
-            keyword,
-            {
-                "sellers": set(),
-                "listings": set(),
-                "prices": [],
-            },
-        )
+        for keyword in matched_keywords:
+            bucket = grouped.setdefault(
+                keyword,
+                {
+                    "sellers": set(),
+                    "listings": set(),
+                    "prices": [],
+                },
+            )
 
-        if seller:
-            bucket["sellers"].add(seller)
+            if seller:
+                bucket["sellers"].add(seller)
 
-        if listing_id:
-            bucket["listings"].add(listing_id)
+            if listing_id:
+                bucket["listings"].add(listing_id)
 
-        if price is not None:
-            bucket["prices"].append(price)
+            if price is not None:
+                bucket["prices"].append(price)
 
     result: list[dict] = []
 
@@ -349,12 +639,26 @@ def _build_keyword_option_rows(
 # ---------------------------------------------------------------------------
 
 
-def _normalized_observation_sql(marketplace: str) -> str:
+def _normalized_observation_sql(
+    marketplace: str,
+    scope: FilterScope,
+    params: dict,
+) -> str:
     seller_column = _SELLER_COLUMN.get(
         marketplace,
         "shop_name",
     )
 
+    scope_filter = _scope_sql_filter(
+        scope,
+        title_column="l.listing_title",
+        condition_column="l.condition_name",
+        params=params,
+    )
+
+    # CO Y KHONG loc theo ``m.keyword``: mapping keyword trong DB co the thieu
+    # hoac lech, trong khi title van hop le. Token ILIKE o tren da du hep va
+    # chac chan la superset cua ket qua matcher.
     return f"""
         SELECT
             '{marketplace}' AS marketplace,
@@ -400,15 +704,15 @@ def _normalized_observation_sql(marketplace: str) -> str:
           ON m.listing_id = l.id
         LEFT JOIN {marketplace}.listing_snapshots s
           ON s.listing_id = l.id
-        WHERE lower(btrim(m.keyword)) = :keyword
-          AND COALESCE(m.exclude_flag, false) = false
+        WHERE COALESCE(m.exclude_flag, false) = false
+        {scope_filter}
     """
 
 
 def _fetch_normalized(
     db: Session,
     *,
-    keyword: str,
+    scope: FilterScope,
     marketplaces: list[str] | None,
     date_from: date | None,
     date_to: date | None,
@@ -431,8 +735,10 @@ def _fetch_normalized(
     if not targets:
         return []
 
+    params: dict = {}
+
     union_sql = "\nUNION ALL\n".join(
-        _normalized_observation_sql(marketplace)
+        _normalized_observation_sql(marketplace, scope, params)
         for marketplace in targets
     )
 
@@ -443,10 +749,6 @@ def _fetch_normalized(
         ) AS observations
         WHERE 1 = 1
     """
-
-    params: dict = {
-        "keyword": keyword.strip().lower(),
-    }
 
     if date_from:
         sql += """
@@ -474,15 +776,12 @@ def _fetch_normalized(
     matched_rows = [
         row
         for row in rows
-        if _row_matches_keyword(
-            row,
-            keyword=keyword,
-        )
+        if _row_matches_scope(row, scope)
     ]
 
     logger.debug(
-        "normalized keyword=%r candidates=%d matched=%d",
-        keyword,
+        "normalized scope=%r candidates=%d matched=%d",
+        scope,
         len(rows),
         len(matched_rows),
     )
@@ -491,7 +790,7 @@ def _fetch_normalized(
         _row_to_observation(
             row,
             marketplace=row.get("marketplace"),
-            keyword=keyword,
+            keyword=scope.keyword or None,
         )
         for row in matched_rows
     ]
@@ -505,6 +804,7 @@ def _fetch_normalized_keywords(
     date_to: date | None,
     min_price: float,
     limit: int,
+    condition: str = "",
 ) -> list[dict]:
     """Danh sach keyword cho selector bang CUNG matcher voi detail.
 
@@ -548,6 +848,7 @@ def _fetch_normalized_keywords(
                 l.listing_title AS listing_title,
                 l.current_price AS price,
                 l.last_seen_at AS observed_date,
+                l.condition_name AS condition_name,
                 NULL::text AS brand,
                 NULL::text AS model,
                 COALESCE(m.exclude_flag, false) AS exclude_flag
@@ -555,7 +856,6 @@ def _fetch_normalized_keywords(
             JOIN {marketplace}.listing_matches m
               ON m.listing_id = l.id
             WHERE COALESCE(m.exclude_flag, false) = false
-              AND btrim(COALESCE(m.keyword, '')) <> ''
             """
         )
 
@@ -574,6 +874,16 @@ def _fetch_normalized_keywords(
     params: dict = {
         "min_price": min_price,
     }
+
+    if condition:
+        sql += """
+            AND lower(
+                btrim(
+                    COALESCE(condition_name, '')
+                )
+            ) = :condition
+        """
+        params["condition"] = condition.strip().lower()
 
     if date_from:
         sql += """
@@ -644,28 +954,29 @@ _FLAT_SELECT = """
 def _fetch_flat(
     db: Session,
     *,
-    keyword: str,
+    scope: FilterScope,
     marketplaces: list[str] | None,
     date_from: date | None,
     date_to: date | None,
 ) -> list[dict]:
+    params: dict = {}
+
     sql = _FLAT_SELECT + """
-        WHERE lower(
-            btrim(
-                COALESCE(r.keyword, '')
-            )
-        ) = :keyword
-          AND btrim(
+        WHERE btrim(
                 COALESCE(r.seller_or_shop, '')
               ) <> ''
           AND r.research_date IS NOT NULL
           AND COALESCE(r.exclude_flag, false) = false
     """
 
-    # SQL dung :keyword nen params bat buoc co "keyword".
-    params: dict = {
-        "keyword": keyword.strip().lower(),
-    }
+    # CO Y KHONG loc theo ``r.keyword``: mode A khong co keyword, va o mode B
+    # cot keyword co the thieu/lech trong khi title van hop le.
+    sql += _scope_sql_filter(
+        scope,
+        title_column="r.listing_title",
+        condition_column='r."condition"',
+        params=params,
+    )
 
     if marketplaces:
         cleaned = [
@@ -708,21 +1019,16 @@ def _fetch_flat(
         params,
     ).mappings().all()
 
-    # QUAN TRONG:
-    # Khong dung strict contiguous phrase nua.
-    # VD keyword "JBL 4311 speaker" phai match title "JBL 4311 speakers".
+    # Quyet dinh cuoi cung luon do matcher, khong phai SQL.
     matched_rows = [
         row
         for row in rows
-        if _row_matches_keyword(
-            row,
-            keyword=keyword,
-        )
+        if _row_matches_scope(row, scope)
     ]
 
     logger.debug(
-        "flat keyword=%r candidates=%d matched=%d",
-        keyword,
+        "flat scope=%r candidates=%d matched=%d",
+        scope,
         len(rows),
         len(matched_rows),
     )
@@ -766,7 +1072,7 @@ def _fetch_flat(
             _row_to_observation(
                 payload,
                 marketplace=row.get("marketplace"),
-                keyword=keyword,
+                keyword=scope.keyword or None,
             )
         )
 
@@ -781,15 +1087,19 @@ def _fetch_flat_keywords(
     date_to: date | None,
     min_price: float,
     limit: int,
+    condition: str = "",
 ) -> list[dict]:
     """Danh sach keyword FLAT cho selector bang CUNG matcher voi detail.
 
-    Day la thay doi quan trong de tranh:
-        Card: 3 listings
-        Click detail: 0 listings
+    Day la thay doi quan trong de tranh lech card <-> detail.
 
-    SQL chi lay candidate theo date/marketplace/price.
-    Python matcher moi quyet dinh listing title co hop keyword hay khong.
+    CO Y KHONG dat dieu kien ``r.keyword IS NOT NULL`` trong SQL:
+    - Cot ``keyword`` chi dung de sinh VOCABULARY keyword co that tren DB.
+    - Con viec mot row co thuoc keyword nao thi do matcher tren TITLE quyet
+      dinh, giong het detail. Neu chan row co keyword NULL o SQL thi card se
+      dem thieu so voi detail (loi "card 6 / detail 7").
+
+    SQL chi lay candidate theo date/marketplace/price/condition.
     """
     sql = """
         SELECT
@@ -806,9 +1116,7 @@ def _fetch_flat_keywords(
                 false
             ) AS exclude_flag
         FROM public.marketplace_research_results r
-        WHERE r.keyword IS NOT NULL
-          AND btrim(r.keyword) <> ''
-          AND r.price IS NOT NULL
+        WHERE r.price IS NOT NULL
           AND r.price > :min_price
           AND btrim(
                 COALESCE(r.seller_or_shop, '')
@@ -819,6 +1127,16 @@ def _fetch_flat_keywords(
     params: dict = {
         "min_price": min_price,
     }
+
+    if condition:
+        sql += """
+            AND lower(
+                btrim(
+                    COALESCE(r."condition", '')
+                )
+            ) = :condition
+        """
+        params["condition"] = condition.strip().lower()
 
     if marketplaces:
         cleaned = [
@@ -865,23 +1183,20 @@ def _fetch_flat_keywords(
 # ---------------------------------------------------------------------------
 
 
-def fetch_keyword_observations(
+def fetch_scope_observations(
     db: Session,
     *,
-    keyword: str,
+    scope: FilterScope,
     source: str,
     marketplaces: list[str] | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> list[dict]:
-    """Tra ve toan bo observation cua 1 keyword, da chuan hoa va match title."""
-    if not keyword or not keyword.strip():
-        return []
-
+    """Toan bo observation thuoc scope, da chuan hoa va da qua matcher."""
     if source == SOURCE_NORMALIZED:
         return _fetch_normalized(
             db,
-            keyword=keyword,
+            scope=scope,
             marketplaces=marketplaces,
             date_from=date_from,
             date_to=date_to,
@@ -890,13 +1205,41 @@ def fetch_keyword_observations(
     if source == SOURCE_FLAT:
         return _fetch_flat(
             db,
-            keyword=keyword,
+            scope=scope,
             marketplaces=marketplaces,
             date_from=date_from,
             date_to=date_to,
         )
 
     return []
+
+
+def fetch_keyword_observations(
+    db: Session,
+    *,
+    keyword: str,
+    source: str,
+    marketplaces: list[str] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    condition: str | None = None,
+) -> list[dict]:
+    """Backward-compatible wrapper cho mode keyword."""
+    if not keyword or not keyword.strip():
+        return []
+
+    return fetch_scope_observations(
+        db,
+        scope=build_scope(
+            filter_mode=FILTER_MODE_KEYWORD,
+            keyword=keyword,
+            condition=condition,
+        ),
+        source=source,
+        marketplaces=marketplaces,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 def fetch_keyword_options(
@@ -908,12 +1251,15 @@ def fetch_keyword_options(
     date_to: date | None = None,
     min_price: float = 500.0,
     limit: int = 200,
+    condition: str | None = None,
 ) -> list[dict]:
-    """Danh sach keyword cho selector, kem seller/listing/median.
+    """Danh sach keyword cho selector/card, kem seller/listing/median.
 
-    Card keyword va detail deu di qua ``listing_matcher`` de giu cung mot
-    definition cua "listing hop keyword".
+    Card keyword va detail deu di qua ``listing_matcher`` (mode keyword) nen
+    giu CHUNG mot definition cua "listing hop keyword".
     """
+    normalized_condition = _clean(condition)
+
     if source == SOURCE_NORMALIZED:
         return _fetch_normalized_keywords(
             db,
@@ -922,6 +1268,7 @@ def fetch_keyword_options(
             date_to=date_to,
             min_price=min_price,
             limit=limit,
+            condition=normalized_condition,
         )
 
     if source == SOURCE_FLAT:
@@ -932,6 +1279,7 @@ def fetch_keyword_options(
             date_to=date_to,
             min_price=min_price,
             limit=limit,
+            condition=normalized_condition,
         )
 
     return []

@@ -159,6 +159,11 @@ async def hqa_keyword_seller_keywords(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/keyword-seller/keywords", request)
 
 
+@app.get("/api/v1/hqa/keyword-seller/filter-options")
+async def hqa_keyword_seller_filter_options(request: Request):
+    return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/keyword-seller/filter-options", request)
+
+
 @app.get("/api/v1/hqa/keyword-seller/analytics")
 async def hqa_keyword_seller_analytics(request: Request):
     return await relay("GET", f"{settings.hqa_service_url}/internal/v1/hqa/keyword-seller/analytics", request)

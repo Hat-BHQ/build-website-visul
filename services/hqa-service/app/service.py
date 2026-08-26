@@ -42,6 +42,9 @@ ALLOWED_FILTER_FIELDS = {
     "buying_option": "buying_options",
     "marketplace": "marketplace",
     "brand": "brand",
+    # Keyword lay tu chinh cot keyword cua marketplace_research_results.
+    # Dung chung co che paging/search/has_more voi cac field con lai.
+    "keyword": "keyword",
 }
 DEFAULT_FILTER_OPTION_PAGE_SIZE = 30
 MAX_FILTER_OPTION_PAGE_SIZE = 100
@@ -160,6 +163,8 @@ def _listing_base_select():
         listing_table.c.updated_at,
         listing_table.c.brand,
         listing_table.c.model,
+        # Can cho filter-options field=keyword (Dashboard Keyword/Seller Mode B).
+        listing_table.c.keyword,
         listing_table.c.buying_options,
         case((marketplace_lower == "ebay", listing_table.c.seller_or_shop), else_=None).label("seller_name"),
         case((marketplace_lower != "ebay", listing_table.c.seller_or_shop), else_=None).label("shop_name"),

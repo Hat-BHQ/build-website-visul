@@ -32,7 +32,11 @@ from app.listing_classifier import (
     build_product_context,
     classify_listing_role,
 )
-from app.listing_matcher import match_listing
+from app.listing_matcher import (
+    FILTER_MODE_BRAND_MODEL,
+    FILTER_MODE_KEYWORD,
+    match_listing_by_mode,
+)
 
 EVENT_TRACKING_STARTED = "TRACKING_STARTED"
 EVENT_PRICE_CHANGED = "PRICE_CHANGED"
@@ -80,61 +84,70 @@ def _normalized_keyword(value) -> str:
     return " ".join(str(value).strip().lower().split())
 
 
-def filter_observations_for_keyword(
+def filter_observations_for_scope(
     observations: list[dict],
     *,
-    keyword: str,
+    filter_mode: str,
+    brand: str = "",
+    model: str = "",
+    keyword: str = "",
 ) -> list[dict]:
-    """Giữ observation thực sự thuộc keyword đang phân tích.
+    """Giữ observation thực sự thuộc scope đang phân tích.
 
     Quy tắc:
-    - ``row.keyword`` phải đúng keyword đang chọn nếu nguồn có metadata keyword.
-    - Với FLAT source, nơi thường có ``brand``/``model``, kiểm tra thêm title qua
-      ``listing_matcher`` để cho phép alias số ít/số nhiều như
-      ``speaker`` <-> ``speakers`` nhưng vẫn giữ model exact.
-    - Với NORMALIZED source, brand/model hiện có thể rỗng. Khi đó tin cậy mapping
-      ``listing_matches.keyword`` của source thay vì tự suy đoán model từ title.
+    - Quyết định duy nhất dựa trên ``listing_title`` qua ``match_listing_by_mode``.
+      Mode A dùng boundary phrase Brand/Model, Mode B dùng cụm keyword liền mạch.
+    - KHÔNG tin vào cột ``brand``/``model``/``keyword`` của DB để quyết định
+      match, vì các cột này có thể thiếu (NORMALIZED source) hoặc lệch so với
+      title (ví dụ row brand=JBL model=4311B nhưng title là "JBL 4312 speaker").
     - Không lọc role tại đây. Role được xử lý riêng bởi ``listing_classifier``.
     """
-    selected_keyword = _normalized_keyword(keyword)
-    if not selected_keyword:
+    normalized_mode = (filter_mode or "").strip().lower()
+
+    if normalized_mode == FILTER_MODE_BRAND_MODEL and not (brand or model):
+        return []
+
+    if normalized_mode == FILTER_MODE_KEYWORD and not keyword:
         return []
 
     matched_rows: list[dict] = []
 
     for row in observations:
-        row_keyword = _normalized_keyword(row.get("keyword"))
-
-        # Source layer phải gắn keyword cho observation. Nếu có thì bắt buộc cùng scope.
-        if row_keyword and row_keyword != selected_keyword:
-            continue
-
-        # Không có metadata keyword thì không tự gom nhầm observation sang keyword khác.
-        if not row_keyword:
+        if row.get("exclude_flag"):
             continue
 
         title = row.get("listing_title") or ""
-        brand = row.get("brand") or None
-        model = row.get("model") or None
 
-        # FLAT source thường có brand/model. Dùng matcher để kiểm tra title một lần nữa.
-        # role="all" để matcher KHÔNG loại component/accessory ở tầng keyword;
-        # việc Whole product do listing_classifier quyết định phía dưới.
-        if brand or model:
-            result = match_listing(
-                title=title,
-                keyword=keyword,
-                brand=brand,
-                model=model,
-                role="all",
-                exclude_keywords=None,
-            )
-            if not result.matched:
-                continue
+        if not match_listing_by_mode(
+            title=title,
+            filter_mode=normalized_mode,
+            brand=brand or None,
+            model=model or None,
+            keyword=keyword or None,
+        ):
+            continue
 
         matched_rows.append(row)
 
     return matched_rows
+
+
+def filter_observations_for_keyword(
+    observations: list[dict],
+    *,
+    keyword: str,
+) -> list[dict]:
+    """Backward-compatible wrapper cho mode keyword."""
+    selected_keyword = _normalized_keyword(keyword)
+
+    if not selected_keyword:
+        return []
+
+    return filter_observations_for_scope(
+        observations,
+        filter_mode=FILTER_MODE_KEYWORD,
+        keyword=keyword,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -677,10 +690,28 @@ def build_keyword_alerts(
 # ---------------------------------------------------------------------------
 
 
-def build_keyword_payload(
+def scope_label(
+    *,
+    filter_mode: str,
+    brand: str = "",
+    model: str = "",
+    keyword: str = "",
+) -> str:
+    """Nhan hien thi cua scope (dung cho card, tieu de, ten file CSV)."""
+    if (filter_mode or "").strip().lower() == FILTER_MODE_KEYWORD:
+        return keyword or ""
+
+    return " ".join(part for part in (brand, model) if part)
+
+
+def build_analytics_payload(
     observations: list[dict],
     *,
-    keyword: str,
+    filter_mode: str,
+    brand: str = "",
+    model: str = "",
+    keyword: str = "",
+    condition: str = "",
     min_price: float = 500.0,
     eligible_roles: set[str] | None = None,
     price_drop_warning_pct: float = 20.0,
@@ -688,12 +719,35 @@ def build_keyword_payload(
     multiple_active_threshold: int = 2,
     include_all_roles: bool = False,
 ) -> dict:
-    """Payload day du cho 1 keyword: KPI, chart series, bang, alert, audit."""
+    """Payload day du cho 1 scope: KPI, chart series, bang, alert, audit.
+
+    Scope duoc mo ta boi ``filter_mode`` + (brand/model) HOAC keyword.
+    Hai mode loai tru nhau; caller phai bao dam khong truyen lan gia tri.
+    """
     roles = eligible_roles or {ROLE_WHOLE}
 
+    normalized_mode = (filter_mode or "").strip().lower()
+    label = scope_label(
+        filter_mode=normalized_mode,
+        brand=brand,
+        model=model,
+        keyword=keyword,
+    )
+    scope_payload = {
+        "filter_mode": normalized_mode,
+        "brand": brand or "",
+        "model": model or "",
+        "keyword": keyword or "",
+        "condition": condition or "",
+        "label": label,
+    }
+
     source_observation_count = len(observations)
-    matched_observations = filter_observations_for_keyword(
+    matched_observations = filter_observations_for_scope(
         observations,
+        filter_mode=normalized_mode,
+        brand=brand,
+        model=model,
         keyword=keyword,
     )
     matched_observation_count = len(matched_observations)
@@ -704,7 +758,8 @@ def build_keyword_payload(
     axis = build_axis(listings)
     if not axis:
         return {
-            "keyword": keyword,
+            "scope": scope_payload,
+            "keyword": label,
             "currency": "USD",
             "axis": [],
             "sellers": [],
@@ -728,7 +783,7 @@ def build_keyword_payload(
                 "excluded_listings": 0,
             },
             "empty_reason": (
-                "no_keyword_match"
+                "no_scope_match"
                 if source_observation_count > 0 and matched_observation_count == 0
                 else "no_listing"
             ),
@@ -818,7 +873,8 @@ def build_keyword_payload(
     )
 
     return {
-        "keyword": keyword,
+        "scope": scope_payload,
+        "keyword": label,
         "currency": currency or "USD",
         "generated_for": latest,
         "axis": axis,
@@ -848,6 +904,31 @@ def build_keyword_payload(
     }
 
 
+def build_keyword_payload(
+    observations: list[dict],
+    *,
+    keyword: str,
+    min_price: float = 500.0,
+    eligible_roles: set[str] | None = None,
+    price_drop_warning_pct: float = 20.0,
+    price_drop_critical_pct: float = 30.0,
+    multiple_active_threshold: int = 2,
+    include_all_roles: bool = False,
+) -> dict:
+    """Backward-compatible wrapper cho mode keyword."""
+    return build_analytics_payload(
+        observations,
+        filter_mode=FILTER_MODE_KEYWORD,
+        keyword=keyword,
+        min_price=min_price,
+        eligible_roles=eligible_roles,
+        price_drop_warning_pct=price_drop_warning_pct,
+        price_drop_critical_pct=price_drop_critical_pct,
+        multiple_active_threshold=multiple_active_threshold,
+        include_all_roles=include_all_roles,
+    )
+
+
 def build_export_rows(payload: dict) -> list[dict]:
     """Phang hoa payload thanh cac dong CSV cho Export."""
     rows = []
@@ -855,7 +936,12 @@ def build_export_rows(payload: dict) -> list[dict]:
         for listing in summary.get("listings", []):
             rows.append(
                 {
-                    "keyword": payload.get("keyword"),
+                    "filter_mode": (payload.get("scope") or {}).get("filter_mode", ""),
+                    "scope": payload.get("keyword"),
+                    "brand_filter": (payload.get("scope") or {}).get("brand", ""),
+                    "model_filter": (payload.get("scope") or {}).get("model", ""),
+                    "keyword_filter": (payload.get("scope") or {}).get("keyword", ""),
+                    "condition_filter": (payload.get("scope") or {}).get("condition", ""),
                     "seller": summary.get("seller"),
                     "marketplace": listing.get("marketplace"),
                     "listing_id": listing.get("listing_id"),

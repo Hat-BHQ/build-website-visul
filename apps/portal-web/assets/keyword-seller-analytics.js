@@ -61,21 +61,73 @@
   };
 
   var API_BASE = '/api/v1/hqa/keyword-seller';
-  var keywordSelectorGlobalListenersBound = false;
+
+  // =========================================================================
+  // FILTER 2 MODE LOAI TRU NHAU
+  //   brand_model : Brand + Model  (Keyword bi disable)
+  //   keyword     : Keyword        (Brand + Model bi disable)
+  // Condition / Min price / Period luon kha dung o ca 2 mode.
+  // =========================================================================
+  var FILTER_MODE = { BRAND_MODEL: 'brand_model', KEYWORD: 'keyword' };
+  var OPTION_PAGE_SIZE = 30;
+  var OPTION_SEARCH_DEBOUNCE_MS = 320;
+
+  // apiField = ten field gui len /keyword-seller/filter-options.
+  // mode = '' nghia la field khong bi rang buoc boi mode nao.
+  var FILTER_FIELDS = {
+    brand: { apiField: 'brand', label: 'Brand', placeholder: 'Tất cả brand', mode: FILTER_MODE.BRAND_MODEL },
+    model: { apiField: 'model', label: 'Model', placeholder: 'Tất cả model', mode: FILTER_MODE.BRAND_MODEL },
+    keyword: { apiField: 'keyword', label: 'Keyword', placeholder: 'Chọn keyword', mode: FILTER_MODE.KEYWORD },
+    condition: { apiField: 'condition', label: 'Condition', placeholder: 'Tất cả condition', mode: '' },
+  };
+  var FILTER_FIELD_ORDER = ['brand', 'model', 'keyword', 'condition'];
+
+  var globalListenersBound = false;
+
+  function defaultLazyOptionState() {
+    return {
+      items: [], page: 0, pageSize: OPTION_PAGE_SIZE, hasMore: true,
+      isLoading: false, isLoaded: false, search: '', error: '',
+      requestId: 0, controller: null,
+    };
+  }
+
+  function defaultOptionStates() {
+    var states = {};
+    FILTER_FIELD_ORDER.forEach(function (field) { states[field] = defaultLazyOptionState(); });
+    return states;
+  }
 
   var view = {
     host: null,
     apiClient: null,
-    keywordOptions: [],
+
+    // --- scope ---
+    filterMode: FILTER_MODE.BRAND_MODEL,
+    brand: '',
+    model: '',
     keyword: '',
-    keywordSelectorOpen: false,
-    keywordSearch: '',
-    period: 'week',
-    role: 'whole_product',
+    condition: '',
     minPrice: CONFIG.minPrice,
+    period: 'week',
+    // Backend luon chay role=whole_product (business rule co dinh),
+    // nen role khong xuat hien tren toolbar.
+    role: 'whole_product',
+
+    // --- dropdown ---
+    openFilterField: '',
+    optionStates: defaultOptionStates(),
+    optionCache: {},
+    optionSearchTimers: {},
+
+    // --- du lieu ---
+    keywordOptions: [],
+    keywordOptionsLoaded: false,
+    cache: {},
+
     loading: false,
     error: '',
-    cache: {},
+    optionsError: '',
     selectedSeller: '',
     expandedSeller: '',
     destroyed: false,
@@ -477,28 +529,258 @@
     return q.toString();
   }
 
-  function keywordOptionsPath() {
-    return API_BASE + '/keywords?' + queryString({ min_price: view.minPrice, limit: 200 });
+  async function api(path, options) {
+    if (!view.apiClient) throw new Error('KeywordSellerAnalytics chưa nhận apiClient.');
+    return view.apiClient(path, options);
   }
 
-  function analyticsPath(keyword) {
-    return API_BASE + '/analytics?' + queryString({
-      keyword: keyword,
+  // =========================================================================
+  // SCOPE HELPERS
+  // =========================================================================
+
+  function isKeywordMode() {
+    return view.filterMode === FILTER_MODE.KEYWORD;
+  }
+
+  // Condition khong bi disable khi doi mode; Brand/Model va Keyword thi co.
+  function isFieldEnabled(field) {
+    var config = FILTER_FIELDS[field];
+    if (!config) return false;
+    if (!config.mode) return true;
+    return config.mode === view.filterMode;
+  }
+
+  function scopeLabel() {
+    if (isKeywordMode()) return view.keyword || '';
+    return [view.brand, view.model].filter(Boolean).join(' ');
+  }
+
+  function scopeIsComplete() {
+    return isKeywordMode() ? !!view.keyword : !!(view.brand || view.model);
+  }
+
+  function scopeHint() {
+    return isKeywordMode() ? 'Vui lòng chọn Keyword.' : 'Vui lòng chọn Brand hoặc Model.';
+  }
+
+  // Cache key phai mang TOAN BO scope, khong duoc cache[keyword] nhu ban cu.
+  // Period co chu dich KHONG nam trong key: payload tra ve la lifecycle day du,
+  // viec cat theo tuan/thang duoc tinh client-side trong buildOverview(), nen
+  // doi period khong lam thay doi du lieu tra ve tu backend.
+  function analyticsCacheKey() {
+    return [
+      view.filterMode,
+      view.brand || '',
+      view.model || '',
+      view.keyword || '',
+      view.condition || '',
+      view.minPrice,
+    ].join('@@');
+  }
+
+  function findAnalytics() {
+    var key = analyticsCacheKey();
+    return Object.prototype.hasOwnProperty.call(view.cache, key) ? view.cache[key] : null;
+  }
+
+  function analyticsParams() {
+    var params = {
+      filter_mode: view.filterMode,
       min_price: view.minPrice,
       include_all_roles: view.role === 'all' ? 'true' : 'false',
+    };
+    // Khong bao gio gui filter cua mode dang khong active.
+    if (isKeywordMode()) {
+      params.keyword = view.keyword;
+    } else {
+      if (view.brand) params.brand = view.brand;
+      if (view.model) params.model = view.model;
+    }
+    if (view.condition) params.condition = view.condition;
+    return params;
+  }
+
+  function analyticsPath() {
+    return API_BASE + '/analytics?' + queryString(analyticsParams());
+  }
+
+  function exportPath() {
+    return API_BASE + '/export?' + queryString(analyticsParams());
+  }
+
+  function keywordCardsPath() {
+    return API_BASE + '/keywords?' + queryString({
+      min_price: view.minPrice,
+      limit: CONFIG.keywordCardLimit,
+      condition: view.condition || '',
     });
   }
 
-  function exportPath(keyword) {
-    return API_BASE + '/export?' + queryString({
-      keyword: keyword, min_price: view.minPrice,
-      include_all_roles: view.role === 'all' ? 'true' : 'false',
+  function filterOptionsPath(field, page, search) {
+    var params = {
+      field: FILTER_FIELDS[field].apiField,
+      page: page,
+      page_size: OPTION_PAGE_SIZE,
+    };
+    if (search) params.search = search;
+    // Model phu thuoc Brand: chi gui brand khi dang lay option cua model.
+    if (field === 'model' && view.brand) params.brand = view.brand;
+    return API_BASE + '/filter-options?' + queryString(params);
+  }
+
+  // =========================================================================
+  // LAZY OPTION LOADER (cung pattern voi All Listings trong app.js)
+  // =========================================================================
+
+  function normalizeOptionValue(value) {
+    return String(value == null ? '' : value).trim();
+  }
+
+  function buildLazyOptionCacheKey(field) {
+    var fieldState = view.optionStates[field] || defaultLazyOptionState();
+    var search = normalizeOptionValue(fieldState.search).toLowerCase();
+    // Model phai co brand trong cache key, neu khong se tra option sai scope.
+    if (field === 'model') {
+      return 'model|brand=' + normalizeOptionValue(view.brand).toLowerCase() + '|search=' + search;
+    }
+    return field + '|search=' + search;
+  }
+
+  function clearLazyOptionCache(field) {
+    Object.keys(view.optionCache).forEach(function (key) {
+      if (key.indexOf(field + '|') === 0) delete view.optionCache[key];
     });
   }
 
-  async function api(path) {
-    if (!view.apiClient) throw new Error('KeywordSellerAnalytics chưa nhận apiClient.');
-    return view.apiClient(path);
+  function abortOptionRequest(field) {
+    var fieldState = view.optionStates[field];
+    if (fieldState && fieldState.controller) {
+      try { fieldState.controller.abort(); } catch (_) { /* no-op */ }
+    }
+  }
+
+  function resetLazyOptionField(field, options) {
+    var opts = options || {};
+    abortOptionRequest(field);
+    if (view.optionSearchTimers[field]) {
+      clearTimeout(view.optionSearchTimers[field]);
+      delete view.optionSearchTimers[field];
+    }
+    view.optionStates[field] = defaultLazyOptionState();
+    if (opts.clearCache) clearLazyOptionCache(field);
+  }
+
+  function mergeOptionItems(existingItems, incomingItems) {
+    var merged = [];
+    var seen = {};
+    (existingItems || []).concat(incomingItems || []).forEach(function (item) {
+      var value = normalizeOptionValue(item && item.value != null ? item.value : item);
+      if (!value) return;
+      var key = value.toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      merged.push({ value: value, label: normalizeOptionValue(item && item.label) || value });
+    });
+    return merged;
+  }
+
+  async function loadLazyOptionField(field, options) {
+    var opts = options || {};
+    var reset = !!opts.reset;
+    var useCache = opts.useCache !== false;
+
+    if (!FILTER_FIELDS[field] || !isFieldEnabled(field)) return;
+
+    var fieldState = view.optionStates[field];
+    if (!fieldState || fieldState.isLoading) return;
+
+    var cacheKey = buildLazyOptionCacheKey(field);
+    if (reset && useCache && view.optionCache[cacheKey]) {
+      var cached = view.optionCache[cacheKey];
+      view.optionStates[field] = Object.assign({}, fieldState, {
+        items: cached.items.slice(),
+        page: cached.page,
+        hasMore: cached.hasMore,
+        isLoaded: true,
+        isLoading: false,
+        error: '',
+        controller: null,
+      });
+      return;
+    }
+
+    if (!reset && !fieldState.hasMore) return;
+    var targetPage = reset ? 1 : fieldState.page + 1;
+
+    // Abort request cu de response cu khong ghi de response moi.
+    abortOptionRequest(field);
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var requestId = fieldState.requestId + 1;
+
+    view.optionStates[field] = Object.assign({}, fieldState, {
+      isLoading: true, error: '', requestId: requestId, controller: controller,
+    });
+
+    var search = normalizeOptionValue(fieldState.search);
+
+    try {
+      var payload = await api(
+        filterOptionsPath(field, targetPage, search),
+        controller ? { signal: controller.signal } : undefined
+      );
+
+      var currentState = view.optionStates[field];
+      if (!currentState || currentState.requestId !== requestId) return;
+
+      var incoming = ((payload && payload.items) || []).map(function (item) {
+        return {
+          value: normalizeOptionValue(item && item.value != null ? item.value : item),
+          label: normalizeOptionValue((item && (item.label || item.value)) || item),
+        };
+      }).filter(function (item) { return !!item.value; });
+
+      var nextItems = reset ? incoming : mergeOptionItems(currentState.items, incoming);
+      var nextState = Object.assign({}, currentState, {
+        items: nextItems,
+        page: Number((payload && payload.page) || targetPage),
+        hasMore: Boolean(payload && payload.has_more),
+        isLoaded: true,
+        isLoading: false,
+        error: '',
+        controller: null,
+      });
+
+      view.optionStates[field] = nextState;
+      view.optionCache[cacheKey] = {
+        items: nextState.items.slice(),
+        page: nextState.page,
+        hasMore: nextState.hasMore,
+      };
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+      var failedState = view.optionStates[field];
+      if (!failedState || failedState.requestId !== requestId) return;
+      view.optionStates[field] = Object.assign({}, failedState, {
+        isLoading: false,
+        error: 'Không tải được danh sách. Thử lại.',
+        controller: null,
+      });
+    }
+  }
+
+  function debounceLazyOptionSearch(field, value) {
+    if (view.optionSearchTimers[field]) clearTimeout(view.optionSearchTimers[field]);
+    view.optionSearchTimers[field] = setTimeout(async function () {
+      var fieldState = view.optionStates[field];
+      if (!fieldState) return;
+      // Search moi: reset page/items/hasMore truoc khi goi lai.
+      view.optionStates[field] = Object.assign({}, fieldState, {
+        search: normalizeOptionValue(value),
+        items: [], page: 0, hasMore: true, isLoaded: false, error: '',
+      });
+      await loadLazyOptionField(field, { reset: true, useCache: true });
+      updateFilterDropdown(field);
+    }, OPTION_SEARCH_DEBOUNCE_MS);
   }
 
   function renderPencilLoader(title, subtitle) {
@@ -518,157 +800,376 @@
       + '<div class="ks-pencil-copy"><strong>' + escapeHtml(title || 'Đang tải Dashboard') + '</strong><span>' + escapeHtml(subtitle || 'Đang phân tích dữ liệu, vui lòng chờ...') + '</span></div></div>';
   }
 
-  function keywordCardMarkup(option) {
-    var cached = findKeyword(view.cache, option.keyword);
-    var active = option.keyword === view.keyword;
-    var detail = '';
-    if (cached) {
-      var overview = buildOverview(cached, view.period);
-      detail = '<span>' + formatCount(overview.sellerCount) + ' sellers · ' + formatCount(overview.eligibleListingCount)
-        + ' listings đủ điều kiện · median ' + formatCurrency(overview.medianPrice, cached.currency) + '</span>'
-        + '<em>' + formatCount(overview.alertCount) + ' cảnh báo trong kỳ đang xem</em>';
-    } else {
-      // Keyword list endpoint is a fast DB-match list and may not yet have gone through
-      // the whole-product classifier. Do not present those numbers as exact analytics.
-      detail = '<span>DB match: ' + formatCount(option.seller_count) + ' sellers · ' + formatCount(option.listing_count) + ' listings</span>'
-        + '<em>Chọn để tính số liệu whole-product chính xác</em>';
-    }
-    return '<button type="button" class="ks-keyword-card ' + (active ? 'is-active' : '') + '" data-ks-keyword-card="' + escapeHtml(option.keyword) + '">'
-      + '<b>' + escapeHtml(option.keyword) + '</b>' + detail + '</button>';
-  }
+  // =========================================================================
+  // SEARCHABLE SINGLE SELECT (markup dung chung class multi-select-* cua
+  // All Listings de UX/CSS giong het trang All Listings)
+  // =========================================================================
 
-  function normalizedKeywordSearch(value) {
-    return String(value == null ? '' : value)
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  function filteredKeywordOptions() {
-    var query = normalizedKeywordSearch(view.keywordSearch);
-    if (!query) return view.keywordOptions.slice();
-    return view.keywordOptions.filter(function (item) {
-      return normalizedKeywordSearch(item.keyword).includes(query);
-    });
-  }
-
-  function keywordOptionMarkup(item) {
-    var selected = item.keyword === view.keyword;
-    return '<button type="button" class="lazy-option-row ks-keyword-option '
-      + (selected ? 'is-selected' : '')
-      + '" data-ks-keyword-option="' + escapeHtml(item.keyword)
-      + '" role="option" aria-selected="' + (selected ? 'true' : 'false') + '">'
-      + '<span>' + escapeHtml(item.keyword) + '</span>'
+  function optionRowMarkup(field, item) {
+    var selected = String(view[field] || '') === item.value;
+    return '<button type="button" class="lazy-option-row ' + (selected ? 'is-selected' : '') + '"'
+      + ' data-ks-option-field="' + escapeHtml(field) + '"'
+      + ' data-ks-option-value="' + escapeHtml(item.value) + '"'
+      + ' role="option" aria-selected="' + (selected ? 'true' : 'false') + '">'
+      + escapeHtml(item.label || item.value)
       + '</button>';
   }
 
-  function renderKeywordSearchSelect() {
-    var filtered = filteredKeywordOptions();
-    var selectedLabel = view.keyword
-      ? '<span class="multi-select-chip">' + escapeHtml(view.keyword) + '</span>'
-      : '<span class="multi-select-placeholder">Chọn keyword</span>';
+  function optionListMarkup(field) {
+    var fieldState = view.optionStates[field] || defaultLazyOptionState();
+    var items = fieldState.items || [];
+    var html = '';
 
-    return '<div class="ks-field ks-keyword-field">'
-      + '<span>Keyword</span>'
-      + '<div class="multi-select ks-keyword-select-wrap" data-ks-keyword-select-wrap style="position:relative">'
-      + '<button type="button" class="multi-select-trigger ks-keyword-trigger" id="ks-keyword-trigger" '
-      + 'data-ks-keyword-trigger aria-haspopup="listbox" aria-expanded="' + (view.keywordSelectorOpen ? 'true' : 'false') + '">'
-      + '<span class="multi-select-trigger-content" title="' + escapeHtml(view.keyword || 'Chọn keyword') + '">' + selectedLabel + '</span>'
+    if (fieldState.isLoading && !items.length) {
+      html += '<div class="multi-select-loading">Đang tải dữ liệu...</div>';
+    }
+    if (fieldState.error) {
+      html += '<div class="multi-select-error">' + escapeHtml(fieldState.error)
+        + ' <button type="button" data-ks-option-retry="' + escapeHtml(field) + '">Retry</button></div>';
+    }
+    if (!fieldState.isLoading && !fieldState.error && !items.length) {
+      html += '<div class="multi-select-empty">Không tìm thấy dữ liệu phù hợp.</div>';
+    }
+
+    html += items.map(function (item) { return optionRowMarkup(field, item); }).join('');
+    return html;
+  }
+
+  function optionFooterMarkup(field) {
+    var fieldState = view.optionStates[field] || defaultLazyOptionState();
+    if (fieldState.hasMore) {
+      return '<button type="button" class="multi-select-load-more" data-ks-option-load-more="'
+        + escapeHtml(field) + '"' + (fieldState.isLoading ? ' disabled' : '') + '>'
+        + (fieldState.isLoading && (fieldState.items || []).length ? 'Đang tải...' : 'Load more')
+        + '</button>';
+    }
+    return '<span class="multi-select-complete">Đã tải hết dữ liệu</span>';
+  }
+
+  function renderFilterSelect(field) {
+    var config = FILTER_FIELDS[field];
+    var enabled = isFieldEnabled(field);
+    var open = enabled && view.openFilterField === field;
+    var fieldState = view.optionStates[field] || defaultLazyOptionState();
+    var value = String(view[field] || '');
+
+    var triggerContent = value
+      ? '<span class="multi-select-chip">' + escapeHtml(value) + '</span>'
+      : '<span class="multi-select-placeholder">' + escapeHtml(config.placeholder) + '</span>';
+
+    return '<div class="ks-field ks-filter-field' + (enabled ? '' : ' is-disabled') + '"'
+      + ' data-ks-filter-wrap="' + escapeHtml(field) + '">'
+      + '<span>' + escapeHtml(config.label)
+      + (enabled ? '' : '<em class="ks-field-lock" title="Bị khoá bởi chế độ lọc đang chọn">khoá</em>')
+      + '</span>'
+      + '<div class="multi-select" style="position:relative">'
+      + '<button type="button" class="multi-select-trigger" id="ks-trigger-' + escapeHtml(field) + '"'
+      + ' data-ks-filter-trigger="' + escapeHtml(field) + '"'
+      + ' aria-haspopup="listbox" aria-expanded="' + (open ? 'true' : 'false') + '"'
+      + ' aria-disabled="' + (enabled ? 'false' : 'true') + '"'
+      + (enabled ? '' : ' disabled tabindex="-1"') + '>'
+      + '<span class="multi-select-trigger-content" title="' + escapeHtml(value || config.placeholder) + '">'
+      + triggerContent + '</span>'
       + '<span class="multi-select-chevron" aria-hidden="true">▾</span>'
       + '</button>'
-      + '<div class="multi-select-dropdown ks-keyword-dropdown" id="ks-keyword-dropdown" '
-      + (view.keywordSelectorOpen ? '' : 'hidden')
-      + ' style="z-index:10000">'
-      + '<div class="multi-select-search"><input type="search" id="ks-keyword-search" '
-      + 'placeholder="Search keyword..." autocomplete="off" spellcheck="false" value="' + escapeHtml(view.keywordSearch) + '"></div>'
-      + '<div class="multi-select-actions">'
-      + '<span class="multi-select-actions-hint">Select one value</span>'
-      + '<button type="button" id="ks-keyword-clear">Clear</button>'
-      + '</div>'
-      + '<div class="multi-select-options ks-keyword-options" id="ks-keyword-options" role="listbox" aria-label="Keyword">'
-      + (filtered.length
-        ? filtered.map(keywordOptionMarkup).join('')
-        : '<div class="multi-select-empty">Không tìm thấy keyword phù hợp.</div>')
-      + '</div>'
-      + '<div class="multi-select-footer"><span class="multi-select-complete" id="ks-keyword-result-count">'
-      + (filtered.length === view.keywordOptions.length
-        ? 'Đã tải hết dữ liệu · ' + formatCount(filtered.length) + ' keyword'
-        : formatCount(filtered.length) + ' / ' + formatCount(view.keywordOptions.length) + ' keyword')
-      + '</span></div>'
-      + '</div>'
-      + '</div>'
-      + '</div>';
+      + '<div class="multi-select-dropdown" id="ks-dropdown-' + escapeHtml(field) + '"'
+      + (open ? '' : ' hidden') + ' style="z-index:10000">'
+      + '<div class="multi-select-search"><input type="search" id="ks-search-' + escapeHtml(field) + '"'
+      + ' data-ks-option-search="' + escapeHtml(field) + '" placeholder="Search..."'
+      + ' aria-label="' + escapeHtml('Tìm ' + config.label) + '" autocomplete="off" spellcheck="false"'
+      + ' value="' + escapeHtml(fieldState.search || '') + '"></div>'
+      + '<div class="multi-select-actions"><span class="multi-select-actions-hint">Select one value</span>'
+      + '<button type="button" data-ks-option-clear="' + escapeHtml(field) + '">Clear</button></div>'
+      + '<div class="multi-select-options" id="ks-options-' + escapeHtml(field) + '" role="listbox"'
+      + ' aria-label="' + escapeHtml(config.label) + '">' + optionListMarkup(field) + '</div>'
+      + '<div class="multi-select-footer" id="ks-footer-' + escapeHtml(field) + '">'
+      + optionFooterMarkup(field) + '</div>'
+      + '</div></div></div>';
   }
 
-  function refreshKeywordSelectorOptions() {
+  // Chi ve lai phan body cua dropdown de KHONG lam mat focus cua search input.
+  function updateFilterDropdown(field) {
     if (!view.host) return;
-    var list = view.host.querySelector('#ks-keyword-options');
-    var resultCount = view.host.querySelector('#ks-keyword-result-count');
-    var filtered = filteredKeywordOptions();
-
-    if (list) {
-      list.innerHTML = filtered.length
-        ? filtered.map(keywordOptionMarkup).join('')
-        : '<div class="multi-select-empty">Không tìm thấy keyword phù hợp.</div>';
-    }
-
-    if (resultCount) {
-      resultCount.textContent = filtered.length === view.keywordOptions.length
-        ? 'Đã tải hết dữ liệu · ' + formatCount(filtered.length) + ' keyword'
-        : formatCount(filtered.length) + ' / ' + formatCount(view.keywordOptions.length) + ' keyword';
-    }
+    var list = view.host.querySelector('#ks-options-' + field);
+    var footer = view.host.querySelector('#ks-footer-' + field);
+    if (list) list.innerHTML = optionListMarkup(field);
+    if (footer) footer.innerHTML = optionFooterMarkup(field);
   }
 
-  function closeKeywordSelectorDom(options) {
+  // =========================================================================
+  // DROPDOWN OPEN / CLOSE
+  // =========================================================================
+
+  function closeAllDropdowns(options) {
     var opts = options || {};
-    view.keywordSelectorOpen = false;
-    if (opts.clearSearch !== false) view.keywordSearch = '';
-
+    view.openFilterField = '';
     if (!view.host) return;
-    var dropdown = view.host.querySelector('#ks-keyword-dropdown');
-    var trigger = view.host.querySelector('#ks-keyword-trigger');
-    var search = view.host.querySelector('#ks-keyword-search');
 
-    if (dropdown) dropdown.hidden = true;
-    if (trigger) trigger.setAttribute('aria-expanded', 'false');
-    if (search && opts.clearSearch !== false) search.value = '';
+    FILTER_FIELD_ORDER.forEach(function (field) {
+      var dropdown = view.host.querySelector('#ks-dropdown-' + field);
+      var trigger = view.host.querySelector('#ks-trigger-' + field);
+      var search = view.host.querySelector('#ks-search-' + field);
+
+      if (dropdown) dropdown.hidden = true;
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+
+      if (opts.clearSearch) {
+        if (search) search.value = '';
+        var fieldState = view.optionStates[field];
+        if (fieldState && fieldState.search) {
+          resetLazyOptionField(field);
+        }
+      }
+    });
   }
 
-  function ensureKeywordSelectorGlobalListeners() {
-    if (keywordSelectorGlobalListenersBound) return;
-    keywordSelectorGlobalListenersBound = true;
+  function toggleFilterField(field) {
+    // Field bi disable: khong mo dropdown, khong search, khong goi API.
+    if (!isFieldEnabled(field)) return;
+
+    var willOpen = view.openFilterField !== field;
+    closeAllDropdowns();
+    if (!willOpen) return;
+
+    view.openFilterField = field;
+    if (!view.host) return;
+
+    var dropdown = view.host.querySelector('#ks-dropdown-' + field);
+    var trigger = view.host.querySelector('#ks-trigger-' + field);
+    var search = view.host.querySelector('#ks-search-' + field);
+
+    if (dropdown) dropdown.hidden = false;
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    if (search) {
+      requestAnimationFrame(function () { search.focus(); search.select(); });
+    }
+
+    var fieldState = view.optionStates[field];
+    if (fieldState && !fieldState.isLoaded && !fieldState.isLoading) {
+      loadLazyOptionField(field, { reset: true, useCache: true }).then(function () {
+        if (view.openFilterField === field) updateFilterDropdown(field);
+      });
+    }
+  }
+
+  function ensureGlobalListeners() {
+    if (globalListenersBound) return;
+    globalListenersBound = true;
 
     document.addEventListener('click', function (event) {
-      if (!view.keywordSelectorOpen || !view.host) return;
-      var wrapper = view.host.querySelector('[data-ks-keyword-select-wrap]');
+      if (!view.openFilterField || !view.host || view.destroyed) return;
+      var wrapper = view.host.querySelector('[data-ks-filter-wrap="' + view.openFilterField + '"]');
       if (wrapper && wrapper.contains(event.target)) return;
-      closeKeywordSelectorDom({ clearSearch: true });
+      closeAllDropdowns();
     });
 
     document.addEventListener('keydown', function (event) {
-      if (event.key !== 'Escape' || !view.keywordSelectorOpen) return;
-      closeKeywordSelectorDom({ clearSearch: true });
+      if (event.key !== 'Escape' || !view.openFilterField || view.destroyed) return;
+      closeAllDropdowns();
     });
+  }
+
+  // =========================================================================
+  // SCOPE MUTATIONS
+  // =========================================================================
+
+  function setFilterMode(mode) {
+    if (mode !== FILTER_MODE.BRAND_MODEL && mode !== FILTER_MODE.KEYWORD) return;
+    // Click vao mode dang active thi KHONG tu tat mode.
+    if (mode === view.filterMode) return;
+
+    closeAllDropdowns({ clearSearch: true });
+
+    // Xoa sach state cua mode cu de request khong bi nhiem filter an.
+    if (mode === FILTER_MODE.KEYWORD) {
+      view.brand = '';
+      view.model = '';
+      resetLazyOptionField('brand', { clearCache: true });
+      resetLazyOptionField('model', { clearCache: true });
+    } else {
+      view.keyword = '';
+      resetLazyOptionField('keyword', { clearCache: true });
+    }
+
+    // Condition / Min price / Period giu nguyen.
+    view.filterMode = mode;
+    view.selectedSeller = '';
+    view.error = '';
+    render();
+    refreshData(false);
+  }
+
+  function selectOptionValue(field, rawValue) {
+    if (!isFieldEnabled(field)) return;
+    var value = normalizeOptionValue(rawValue);
+    if (!value) return;
+
+    if (field === 'brand') {
+      if (view.brand === value) { closeAllDropdowns(); return; }
+      view.brand = value;
+      // Doi Brand -> Model cu co the khong con dung scope.
+      view.model = '';
+      resetLazyOptionField('model', { clearCache: true });
+    } else if (field === 'model') {
+      view.model = value;
+    } else if (field === 'keyword') {
+      view.keyword = value;
+    } else if (field === 'condition') {
+      view.condition = value;
+      // Card keyword phai tinh lai theo condition moi.
+      view.keywordOptionsLoaded = false;
+    }
+
+    view.selectedSeller = '';
+    view.error = '';
+    closeAllDropdowns();
+    render();
+    refreshData(false);
+  }
+
+  function clearFilterField(field) {
+    if (!isFieldEnabled(field)) return;
+
+    if (field === 'brand') {
+      view.brand = '';
+      // Brand bi Clear -> Model cung Clear vi co the khong con dung scope.
+      view.model = '';
+      resetLazyOptionField('model', { clearCache: true });
+    } else if (field === 'model') {
+      view.model = '';
+    } else if (field === 'keyword') {
+      // Mode van la Keyword, khong tu doi mode khi Clear.
+      view.keyword = '';
+    } else if (field === 'condition') {
+      view.condition = '';
+      view.keywordOptionsLoaded = false;
+    }
+
+    view.selectedSeller = '';
+    view.error = '';
+    render();
+    refreshData(false);
+  }
+
+  function setMinPrice(rawValue) {
+    var value = Number(rawValue);
+    view.minPrice = Number.isFinite(value) && value >= 0 ? value : CONFIG.minPrice;
+    view.cache = {};
+    view.keywordOptionsLoaded = false;
+    render();
+    refreshData(true);
+  }
+
+  // =========================================================================
+  // CARD DUOI TOOLBAR
+  // =========================================================================
+
+  function cardStatsMarkup(payload) {
+    if (!payload) {
+      return '<span>Đang tính số liệu whole-product...</span><em>&nbsp;</em>';
+    }
+    var overview = buildOverview(payload, view.period);
+    return '<span>' + formatCount(overview.sellerCount) + ' sellers · '
+      + formatCount(overview.eligibleListingCount) + ' listings đủ điều kiện · median '
+      + formatCurrency(overview.medianPrice, payload.currency) + '</span>'
+      + '<em>' + formatCount(overview.alertCount) + ' cảnh báo trong kỳ đang xem</em>';
+  }
+
+  function keywordCardMarkup(option) {
+    var active = option.keyword === view.keyword;
+    var cached = active ? findAnalytics() : null;
+    var detail = cached
+      ? cardStatsMarkup(cached)
+      // /keywords la danh sach nhanh theo DB match, chua chay whole-product
+      // classifier, nen phai ghi ro nhan "DB match" theo dung yeu cau.
+      : '<span>DB match: ' + formatCount(option.seller_count) + ' sellers · '
+        + formatCount(option.listing_count) + ' listings</span>'
+        + '<em>Chọn để tính số liệu whole-product chính xác</em>';
+
+    return '<button type="button" class="ks-keyword-card ' + (active ? 'is-active' : '') + '"'
+      + ' data-ks-keyword-card="' + escapeHtml(option.keyword) + '">'
+      + '<b>' + escapeHtml(option.keyword) + '</b>' + detail + '</button>';
+  }
+
+  // Mode A KHONG dung keyword card. Card duoc ve theo Brand / Model.
+  function brandModelCardMarkup() {
+    if (!view.brand && !view.model) return '';
+    var payload = findAnalytics();
+    var title = '';
+    if (view.brand) title += '<b>' + escapeHtml(view.brand) + '</b>';
+    if (view.model) title += '<b class="ks-card-model">' + escapeHtml(view.model) + '</b>';
+    return '<div class="ks-keyword-card ks-scope-card is-active">' + title + cardStatsMarkup(payload) + '</div>';
+  }
+
+  function renderScopeStrip() {
+    if (isKeywordMode()) {
+      var options = view.keywordOptions.slice(0, CONFIG.keywordCardLimit);
+      if (!options.length) return '';
+      return '<div class="ks-keyword-strip-wrap"><div class="ks-keyword-strip" role="list">'
+        + options.map(keywordCardMarkup).join('') + '</div>'
+        + '<div class="ks-strip-note">← Kéo ngang để xem thêm keyword · số liệu whole-product chính xác được tính khi keyword đã tải analytics.</div></div>';
+    }
+
+    var card = brandModelCardMarkup();
+    if (!card) return '';
+    return '<div class="ks-keyword-strip-wrap"><div class="ks-keyword-strip" role="list">' + card + '</div>'
+      + '<div class="ks-strip-note">Card theo Brand / Model đang chọn · dùng chung analytics scope với phần chi tiết bên dưới.</div></div>';
+  }
+
+  // =========================================================================
+  // TOOLBAR
+  // =========================================================================
+
+  function renderModeSwitch() {
+    var modes = [
+      { key: FILTER_MODE.BRAND_MODEL, label: 'Brand + Model' },
+      { key: FILTER_MODE.KEYWORD, label: 'Keyword' },
+    ];
+    return '<div class="ks-field ks-mode-field"><span>Lọc theo</span>'
+      + '<div class="ks-segment ks-mode-segment" role="radiogroup" aria-label="Chế độ lọc">'
+      + modes.map(function (item) {
+        var active = item.key === view.filterMode;
+        return '<button type="button" role="radio" aria-checked="' + (active ? 'true' : 'false') + '"'
+          + ' class="' + (active ? 'is-active' : '') + '" data-ks-filter-mode="' + item.key + '">'
+          + escapeHtml(item.label) + '</button>';
+      }).join('')
+      + '</div></div>';
   }
 
   function renderToolbar() {
     return '<div class="ks-toolbar">'
-      + renderKeywordSearchSelect()
-      + '<label class="ks-field"><span>Vai trò</span><select id="ks-role-select"><option value="whole_product" ' + (view.role === 'whole_product' ? 'selected' : '') + '>Whole product</option><option value="all" ' + (view.role === 'all' ? 'selected' : '') + '>Tất cả (audit)</option></select></label>'
-      + '<label class="ks-field"><span>Ngưỡng giá</span><div class="ks-price-row"><b>&gt; $</b><input id="ks-min-price" type="number" min="0" step="1" value="' + escapeHtml(view.minPrice) + '"></div></label>'
-      + '<div class="ks-segment" aria-label="Khoảng thời gian">'
-      + CONFIG.periods.map(function (item) { return '<button type="button" data-ks-period="' + item.key + '" class="' + (item.key === view.period ? 'is-active' : '') + '">' + escapeHtml(item.label) + '</button>'; }).join('')
-      + '</div>'
-      + '<div class="ks-toolbar-actions"><button type="button" id="ks-refresh" class="ks-icon-button" title="Làm mới">↻</button><button type="button" id="ks-export" class="ks-export-button">⇩ Xuất CSV</button></div>'
+      // ROW 1 theo mockup: MODE | BRAND + MODEL | KEYWORD.
+      + '<section class="ks-toolbar-panel ks-toolbar-top" aria-label="Bộ lọc sản phẩm">'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--mode">' + renderModeSwitch() + '</div>'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--brand-model">'
+      + '<div class="ks-brand-model-group">'
+      + renderFilterSelect('brand') + renderFilterSelect('model')
+      + '</div></div>'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--keyword">' + renderFilterSelect('keyword') + '</div>'
+      + '</section>'
+      // ROW 2 theo mockup: CONDITION | NGUONG GIA | TUAN/THANG/VONG DOI | ACTIONS.
+      + '<section class="ks-toolbar-panel ks-toolbar-bottom" aria-label="Bộ lọc điều kiện và thời gian">'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--condition">' + renderFilterSelect('condition') + '</div>'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--price">'
+      + '<label class="ks-field ks-price-field"><span>Ngưỡng giá</span><div class="ks-price-row"><b>&gt; $</b>'
+      + '<input id="ks-min-price" type="number" min="0" step="1" value="' + escapeHtml(view.minPrice) + '">'
+      + '<button type="button" id="ks-min-price-clear" class="ks-mini-clear" title="Về mặc định $' + CONFIG.minPrice + '">Clear</button>'
+      + '</div></label></div>'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--period">'
+      + '<div class="ks-segment ks-period-segment" aria-label="Khoảng thời gian">'
+      + CONFIG.periods.map(function (item) {
+        return '<button type="button" data-ks-period="' + item.key + '" class="'
+          + (item.key === view.period ? 'is-active' : '') + '">' + escapeHtml(item.label) + '</button>';
+      }).join('')
+      + '</div></div>'
+      + '<div class="ks-toolbar-cell ks-toolbar-cell--actions">'
+      + '<div class="ks-toolbar-actions">'
+      + '<button type="button" id="ks-refresh" class="ks-icon-button" title="Làm mới">↻</button>'
+      + '<button type="button" id="ks-export" class="ks-export-button"' + (scopeIsComplete() ? '' : ' disabled')
+      + '>⇩ Xuất CSV</button>'
+      + '</div></div>'
+      + '</section>'
       + '</div>';
-  }
-
-  function renderKeywordStrip() {
-    var options = view.keywordOptions.slice(0, CONFIG.keywordCardLimit);
-    if (!options.length) return '';
-    return '<div class="ks-keyword-strip-wrap"><div class="ks-keyword-strip" role="list">'
-      + options.map(keywordCardMarkup).join('') + '</div>'
-      + '<div class="ks-strip-note">← Kéo ngang để xem thêm keyword · số liệu chính xác được tính khi keyword đã tải analytics.</div></div>';
   }
 
   function renderAlertCard(alert) {
@@ -884,154 +1385,256 @@ function sellerColorByName(payload, sellerName) {
 
   function render() {
     if (!view.host || view.destroyed) return;
-    if (view.loading && !findKeyword(view.cache, view.keyword)) {
-      view.host.innerHTML = '<div class="ks-module">' + renderPencilLoader('Đang tải Keyword / Seller Analytics', 'Đang đọc keyword, seller và lịch sử listing từ database...') + '</div>';
-      return;
-    }
-    if (view.error && !view.keywordOptions.length) {
-      view.host.innerHTML = '<div class="ks-module"><div class="ks-state ks-state--error"><b>Không tải được Dashboard</b><span>' + escapeHtml(view.error) + '</span><button type="button" id="ks-retry">Thử lại</button></div></div>';
-      bindEvents(); return;
-    }
-    var payload = findKeyword(view.cache, view.keyword);
-    var body = '';
-    if (payload) body = renderMain(payload);
-    else if (view.loading) body = renderPencilLoader('Đang tải ' + view.keyword, 'Đang phân tích seller và listing của keyword...');
-    else body = '<div class="ks-empty-card">Chọn một keyword để bắt đầu phân tích.</div>';
 
-    view.host.innerHTML = '<div class="ks-module">' + renderToolbar() + renderKeywordStrip()
-      + (view.error ? '<div class="ks-inline-error">' + escapeHtml(view.error) + '</div>' : '')
+    var payload = findAnalytics();
+    var body;
+
+    if (!scopeIsComplete()) {
+      body = '<div class="ks-empty-card ks-scope-hint">' + escapeHtml(scopeHint()) + '</div>';
+    } else if (payload) {
+      body = renderMain(payload);
+    } else if (view.loading) {
+      body = renderPencilLoader(
+        'Đang tải ' + (scopeLabel() || 'dữ liệu'),
+        'Đang phân tích seller và listing từ database...'
+      );
+    } else if (view.error) {
+      body = '<div class="ks-state ks-state--error"><b>Không tải được dữ liệu</b><span>'
+        + escapeHtml(view.error) + '</span><button type="button" id="ks-retry">Thử lại</button></div>';
+    } else {
+      body = '<div class="ks-empty-card">Không có dữ liệu phù hợp với bộ lọc đang chọn.</div>';
+    }
+
+    view.host.innerHTML = '<div class="ks-module">'
+      + renderToolbar()
+      + renderScopeStrip()
+      + (view.optionsError ? '<div class="ks-inline-error">' + escapeHtml(view.optionsError) + '</div>' : '')
+      + (view.error && payload ? '<div class="ks-inline-error">' + escapeHtml(view.error) + '</div>' : '')
       + body
       + (payload && view.selectedSeller ? renderDrawer(payload, view.selectedSeller) : '')
       + '</div>';
+
     bindEvents();
+  }
+
+  // =========================================================================
+  // EVENT DELEGATION
+  // =========================================================================
+
+  function onHostClick(event) {
+    if (view.destroyed || !view.host) return;
+    var target = event.target;
+    if (!target || !target.closest) return;
+
+    var modeButton = target.closest('[data-ks-filter-mode]');
+    if (modeButton) {
+      event.preventDefault();
+      setFilterMode(modeButton.getAttribute('data-ks-filter-mode') || '');
+      return;
+    }
+
+    var trigger = target.closest('[data-ks-filter-trigger]');
+    if (trigger) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFilterField(trigger.getAttribute('data-ks-filter-trigger') || '');
+      return;
+    }
+
+    var option = target.closest('[data-ks-option-value]');
+    if (option) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectOptionValue(
+        option.getAttribute('data-ks-option-field') || '',
+        option.getAttribute('data-ks-option-value') || ''
+      );
+      return;
+    }
+
+    var clearButton = target.closest('[data-ks-option-clear]');
+    if (clearButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearFilterField(clearButton.getAttribute('data-ks-option-clear') || '');
+      return;
+    }
+
+    var loadMore = target.closest('[data-ks-option-load-more]');
+    if (loadMore) {
+      event.preventDefault();
+      event.stopPropagation();
+      var loadMoreField = loadMore.getAttribute('data-ks-option-load-more') || '';
+      loadLazyOptionField(loadMoreField, { reset: false, useCache: false })
+        .then(function () { updateFilterDropdown(loadMoreField); });
+      return;
+    }
+
+    var retryOption = target.closest('[data-ks-option-retry]');
+    if (retryOption) {
+      event.preventDefault();
+      event.stopPropagation();
+      var retryField = retryOption.getAttribute('data-ks-option-retry') || '';
+      loadLazyOptionField(retryField, { reset: true, useCache: false })
+        .then(function () { updateFilterDropdown(retryField); });
+      return;
+    }
+
+    // Click ben trong dropdown nhung khong trung control nao: giu dropdown mo.
+    if (target.closest('.multi-select-dropdown')) {
+      event.stopPropagation();
+      return;
+    }
+
+    var keywordCard = target.closest('[data-ks-keyword-card]');
+    if (keywordCard) {
+      event.preventDefault();
+      selectOptionValue('keyword', keywordCard.getAttribute('data-ks-keyword-card') || '');
+      return;
+    }
+
+    var periodButton = target.closest('[data-ks-period]');
+    if (periodButton) {
+      event.preventDefault();
+      view.period = periodButton.getAttribute('data-ks-period') || 'week';
+      view.selectedSeller = '';
+      render();
+      return;
+    }
+
+    var openSeller = target.closest('[data-ks-open-seller]');
+    if (openSeller) {
+      event.preventDefault();
+      view.selectedSeller = openSeller.getAttribute('data-ks-open-seller') || '';
+      render();
+      return;
+    }
+
+    if (target.closest('[data-ks-close-drawer]')) {
+      event.preventDefault();
+      view.selectedSeller = '';
+      render();
+      return;
+    }
+
+    if (target.closest('#ks-min-price-clear')) {
+      event.preventDefault();
+      // Clear ngưỡng giá = quay ve mac dinh business rule, khong bo filter.
+      setMinPrice(CONFIG.minPrice);
+      return;
+    }
+
+    if (target.closest('#ks-refresh') || target.closest('#ks-retry')) {
+      event.preventDefault();
+      view.cache = {};
+      view.optionCache = {};
+      view.keywordOptionsLoaded = false;
+      FILTER_FIELD_ORDER.forEach(function (field) { resetLazyOptionField(field); });
+      refreshData(true);
+      return;
+    }
+
+    if (target.closest('#ks-export')) {
+      event.preventDefault();
+      var payload = findAnalytics();
+      if (payload) exportCurrentCsv(payload);
+    }
+  }
+
+  function onHostInput(event) {
+    if (view.destroyed) return;
+    var target = event.target;
+    if (!target || !target.getAttribute) return;
+
+    var searchField = target.getAttribute('data-ks-option-search');
+    if (searchField) {
+      event.stopPropagation();
+      debounceLazyOptionSearch(searchField, target.value || '');
+    }
+  }
+
+  function onHostChange(event) {
+    if (view.destroyed) return;
+    var target = event.target;
+    if (target && target.id === 'ks-min-price') setMinPrice(target.value);
   }
 
   function bindEvents() {
     if (!view.host) return;
-
-    ensureKeywordSelectorGlobalListeners();
-
-    var keywordTrigger = view.host.querySelector('#ks-keyword-trigger');
-    var keywordDropdown = view.host.querySelector('#ks-keyword-dropdown');
-    var keywordSearch = view.host.querySelector('#ks-keyword-search');
-    var keywordOptions = view.host.querySelector('#ks-keyword-options');
-    var keywordClear = view.host.querySelector('#ks-keyword-clear');
-
-    if (keywordTrigger && keywordDropdown) {
-      keywordTrigger.addEventListener('click', function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        view.keywordSelectorOpen = !view.keywordSelectorOpen;
-        keywordDropdown.hidden = !view.keywordSelectorOpen;
-        keywordTrigger.setAttribute('aria-expanded', String(view.keywordSelectorOpen));
-
-        if (view.keywordSelectorOpen && keywordSearch) {
-          requestAnimationFrame(function () {
-            keywordSearch.focus();
-            keywordSearch.select();
-          });
-        }
-      });
-    }
-
-    if (keywordSearch) {
-      keywordSearch.addEventListener('click', function (event) {
-        event.stopPropagation();
-      });
-      keywordSearch.addEventListener('input', function () {
-        view.keywordSearch = keywordSearch.value || '';
-        refreshKeywordSelectorOptions();
-      });
-    }
-
-    if (keywordOptions) {
-      keywordOptions.addEventListener('click', function (event) {
-        var option = event.target.closest('[data-ks-keyword-option]');
-        if (!option) return;
-        event.preventDefault();
-        event.stopPropagation();
-
-        var keyword = option.getAttribute('data-ks-keyword-option') || '';
-        if (!keyword) return;
-
-        view.keywordSelectorOpen = false;
-        view.keywordSearch = '';
-        selectKeyword(keyword);
-      });
-    }
-
-    if (keywordClear) {
-      keywordClear.addEventListener('click', function (event) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        view.keyword = '';
-        view.keywordSearch = '';
-        view.selectedSeller = '';
-        view.keywordSelectorOpen = true;
-
-        if (keywordSearch) keywordSearch.value = '';
-        refreshKeywordSelectorOptions();
-
-        var triggerContent = view.host.querySelector('#ks-keyword-trigger .multi-select-trigger-content');
-        if (triggerContent) triggerContent.innerHTML = '<span class="multi-select-placeholder">Chọn keyword</span>';
-
-        if (keywordDropdown) keywordDropdown.hidden = false;
-        if (keywordTrigger) keywordTrigger.setAttribute('aria-expanded', 'true');
-
-        if (keywordSearch) {
-          requestAnimationFrame(function () { keywordSearch.focus(); });
-        }
-      });
-    }
-
-    view.host.querySelectorAll('[data-ks-keyword-card]').forEach(function (button) {
-      button.addEventListener('click', function () { selectKeyword(button.getAttribute('data-ks-keyword-card')); });
-    });
-
-    var role = view.host.querySelector('#ks-role-select');
-    if (role) role.addEventListener('change', function () {
-      view.role = role.value || 'whole_product';
-      view.cache = {}; loadKeyword(view.keyword, true);
-    });
-
-    var minPrice = view.host.querySelector('#ks-min-price');
-    if (minPrice) minPrice.addEventListener('change', function () {
-      var value = Number(minPrice.value);
-      view.minPrice = Number.isFinite(value) && value >= 0 ? value : CONFIG.minPrice;
-      view.cache = {}; loadAll(true);
-    });
-
-    view.host.querySelectorAll('[data-ks-period]').forEach(function (button) {
-      button.addEventListener('click', function () {
-        view.period = button.getAttribute('data-ks-period') || 'week';
-        view.selectedSeller = '';
-        render();
-      });
-    });
-
-    view.host.querySelectorAll('[data-ks-open-seller]').forEach(function (element) {
-      element.addEventListener('click', function () {
-        view.selectedSeller = element.getAttribute('data-ks-open-seller') || '';
-        render();
-      });
-    });
-    view.host.querySelectorAll('[data-ks-close-drawer]').forEach(function (element) {
-      element.addEventListener('click', function () { view.selectedSeller = ''; render(); });
-    });
-
-    var refresh = view.host.querySelector('#ks-refresh');
-    if (refresh) refresh.addEventListener('click', function () { loadAll(true); });
-    var retry = view.host.querySelector('#ks-retry');
-    if (retry) retry.addEventListener('click', function () { loadAll(true); });
-    var exportButton = view.host.querySelector('#ks-export');
-    if (exportButton) exportButton.addEventListener('click', function () {
-      var payload = findKeyword(view.cache, view.keyword);
-      if (payload) exportCurrentCsv(payload);
-    });
+    ensureGlobalListeners();
+    // Delegation gan MOT lan tren host, khong bi nhan doi sau moi lan render.
+    if (view.host.__ksDelegationBound) return;
+    view.host.__ksDelegationBound = true;
+    view.host.addEventListener('click', onHostClick);
+    view.host.addEventListener('input', onHostInput);
+    view.host.addEventListener('change', onHostChange);
   }
 
+  // =========================================================================
+  // DATA LOADING
+  // =========================================================================
+
+  function payloadFromApi(raw) {
+    var payload = keywordFromPayload(raw);
+    if (payload) payload.scope = (raw && raw.scope) || null;
+    return payload;
+  }
+
+  async function loadKeywordCards(force) {
+    // Card keyword chi ton tai o Mode B.
+    if (!isKeywordMode()) return;
+    if (!force && view.keywordOptionsLoaded) return;
+    try {
+      var payload = await api(keywordCardsPath());
+      view.keywordOptions = (((payload && payload.items) || [])).map(function (item) {
+        return {
+          keyword: String(item.keyword || '').trim(),
+          seller_count: Number(item.seller_count || 0),
+          listing_count: Number(item.listing_count || 0),
+          median_price: item.median_price,
+        };
+      }).filter(function (item) { return !!item.keyword; });
+      view.keywordOptionsLoaded = true;
+      view.optionsError = '';
+    } catch (error) {
+      // Card strip chi la phu tro; khong duoc chan analytics chinh.
+      view.optionsError = error && error.message ? error.message : 'Không tải được danh sách keyword.';
+    }
+  }
+
+  async function loadAnalytics(force) {
+    if (!scopeIsComplete()) {
+      view.loading = false;
+      view.error = '';
+      render();
+      return;
+    }
+
+    var key = analyticsCacheKey();
+    if (!force && Object.prototype.hasOwnProperty.call(view.cache, key)) {
+      render();
+      return;
+    }
+
+    view.loading = true;
+    view.error = '';
+    render();
+
+    try {
+      var raw = await api(analyticsPath());
+      view.cache[key] = payloadFromApi(raw);
+    } catch (error) {
+      view.error = error && error.message ? error.message : 'Không tải được analytics.';
+    } finally {
+      view.loading = false;
+      render();
+    }
+  }
+
+  async function refreshData(force) {
+    await loadKeywordCards(Boolean(force));
+    await loadAnalytics(Boolean(force));
+  }
 
   function csvCell(value) {
     var text = value == null ? '' : String(value);
@@ -1040,13 +1643,23 @@ function sellerColorByName(payload, sellerName) {
 
   function exportCurrentCsv(payload) {
     var overview = buildOverview(payload, view.period);
-    var header = ['keyword','seller','listing_id','listing_title','first_seen','current_price','status','eligible','representative','change_pct','listing_url'];
+    var header = [
+      'filter_mode', 'scope', 'brand_filter', 'model_filter', 'keyword_filter', 'condition_filter',
+      'seller', 'listing_id', 'listing_title', 'first_seen', 'current_price', 'status',
+      'eligible', 'representative', 'change_pct', 'listing_url',
+    ];
     var rows = [header];
     (payload.sellers || []).forEach(function (seller) {
       var sellerRow = overview.sellers.find(function (item) { return item.seller === seller.seller; });
       (seller.listings || []).forEach(function (listing) {
         rows.push([
-          payload.keyword, seller.seller, listing.listing_id, listing.title || '',
+          view.filterMode,
+          payload.keyword || scopeLabel(),
+          view.brand || '',
+          view.model || '',
+          view.keyword || '',
+          view.condition || '',
+          seller.seller, listing.listing_id, listing.title || '',
           listing.first_seen || listing.published_at || '', listing.current_price,
           listing.status || '', listing.eligible ? 'yes' : 'no',
           sellerRow && sellerRow.representativeListingId === listing.listing_id ? 'yes' : 'no',
@@ -1056,87 +1669,43 @@ function sellerColorByName(payload, sellerName) {
     });
     var csv = '\ufeff' + rows.map(function (row) { return row.map(csvCell).join(','); }).join('\r\n');
     var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    var url = URL.createObjectURL(blob); var anchor = document.createElement('a');
-    anchor.href = url; anchor.download = ('keyword_seller_' + payload.keyword + '.csv').replace(/[^a-zA-Z0-9._-]+/g, '_');
+    var url = URL.createObjectURL(blob);
+    var anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = ('keyword_seller_' + (scopeLabel() || 'export') + '.csv').replace(/[^a-zA-Z0-9._-]+/g, '_');
     document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
-  }
-
-  async function selectKeyword(keyword) {
-    if (!keyword) return;
-
-    view.keywordSelectorOpen = false;
-    view.keywordSearch = '';
-
-    if (keyword === view.keyword && findKeyword(view.cache, keyword)) {
-      closeKeywordSelectorDom({ clearSearch: true });
-      return;
-    }
-
-    view.keyword = keyword;
-    view.selectedSeller = '';
-
-    if (findKeyword(view.cache, keyword)) {
-      render();
-      return;
-    }
-
-    await loadKeyword(keyword, false);
-  }
-
-  async function loadKeyword(keyword, force) {
-    if (!keyword) return;
-    if (!force && findKeyword(view.cache, keyword)) { render(); return; }
-    view.loading = true; view.error = ''; render();
-    try {
-      var raw = await api(analyticsPath(keyword));
-      view.cache[keyword] = keywordFromPayload(raw);
-    } catch (error) {
-      view.error = error && error.message ? error.message : 'Không tải được analytics.';
-    } finally {
-      view.loading = false; render();
-    }
-  }
-
-  async function loadAll(force) {
-    view.loading = true; view.error = '';
-    if (force) view.keywordOptions = [];
-    render();
-    try {
-      var optionsPayload = await api(keywordOptionsPath());
-      view.keywordOptions = (optionsPayload && optionsPayload.items || []).map(function (item) {
-        return {
-          keyword: String(item.keyword || '').trim(), seller_count: Number(item.seller_count || 0),
-          listing_count: Number(item.listing_count || 0), median_price: item.median_price,
-        };
-      }).filter(function (item) { return !!item.keyword; });
-      if (!view.keyword || !view.keywordOptions.some(function (item) { return item.keyword === view.keyword; })) {
-        view.keyword = view.keywordOptions.length ? view.keywordOptions[0].keyword : '';
-      }
-      view.loading = false;
-      if (view.keyword) await loadKeyword(view.keyword, force);
-      else render();
-    } catch (error) {
-      view.loading = false;
-      view.error = error && error.message ? error.message : 'Không tải được danh sách keyword.';
-      render();
-    }
   }
 
   async function mount(host, options) {
     view.host = host;
     view.apiClient = options && options.apiClient ? options.apiClient : null;
     view.destroyed = false;
-    view.keywordSelectorOpen = false;
-    view.keywordSearch = '';
-    view.period = 'week'; // requested default
-    if (options && options.reload === false && view.keywordOptions.length) { render(); return; }
-    await loadAll(Boolean(options && options.reload));
+    view.openFilterField = '';
+    view.selectedSeller = '';
+    view.error = '';
+    view.optionsError = '';
+
+    var reload = Boolean(options && options.reload);
+    if (reload) {
+      view.cache = {};
+      view.optionCache = {};
+      view.optionStates = defaultOptionStates();
+      view.keywordOptions = [];
+      view.keywordOptionsLoaded = false;
+    }
+
+    render();
+    await refreshData(reload);
   }
 
   function destroy() {
     view.destroyed = true;
-    view.keywordSelectorOpen = false;
-    view.keywordSearch = '';
+    view.openFilterField = '';
+    FILTER_FIELD_ORDER.forEach(function (field) { abortOptionRequest(field); });
+    Object.keys(view.optionSearchTimers).forEach(function (field) {
+      clearTimeout(view.optionSearchTimers[field]);
+    });
+    view.optionSearchTimers = {};
     view.host = null;
     view.selectedSeller = '';
   }
@@ -1146,6 +1715,8 @@ function sellerColorByName(payload, sellerName) {
     destroy: destroy,
     config: CONFIG,
     colorSemantics: COLOR_SEMANTICS,
+    filterModes: FILTER_MODE,
+    filterFields: FILTER_FIELDS,
     logic: {
       findKeyword: findKeyword,
       windowDates: windowDates,
@@ -1154,6 +1725,17 @@ function sellerColorByName(payload, sellerName) {
       classifyEventAlert: classifyEventAlert,
       chooseChartSellers: chooseChartSellers,
       percentChange: percentChange,
+      isFieldEnabled: isFieldEnabled,
+      scopeIsComplete: scopeIsComplete,
+      scopeLabel: scopeLabel,
+      analyticsParams: analyticsParams,
+      analyticsCacheKey: analyticsCacheKey,
+      buildLazyOptionCacheKey: buildLazyOptionCacheKey,
+      setFilterMode: setFilterMode,
+      selectOptionValue: selectOptionValue,
+      clearFilterField: clearFilterField,
+      defaultLazyOptionState: defaultLazyOptionState,
+      state: view,
     },
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -555,7 +555,9 @@ async function renderHqaKeywordSeller({ reload = false } = {}) {
   await analytics.mount(host, {
     reload,
     // Module dung duong dan day du /api/v1/...; api() da tu them tien to nay.
-    apiClient: (path) => api(path.replace(/^\/api\/v1/, '')),
+    // Tham so thu hai duoc chuyen tiep de module dung duoc AbortController
+    // khi user go lien tuc trong searchable select.
+    apiClient: (path, options) => api(path.replace(/^\/api\/v1/, ''), options || {}),
   });
 }
 

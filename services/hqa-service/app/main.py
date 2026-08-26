@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.keyword_catalog import load_keyword_catalog
-from app.keyword_seller_analytics import build_export_rows, build_keyword_payload
+from app.keyword_seller_analytics import build_analytics_payload, build_export_rows
 from app.keyword_seller_source import (
     SOURCE_NONE,
-    fetch_keyword_observations,
+    build_scope,
     fetch_keyword_options,
+    fetch_scope_observations,
     resolve_source,
 )
 from app.report_config import REPORT_GROUPS_BY_KEY, get_keyword_metadata
@@ -1511,10 +1512,38 @@ def _keyword_seller_source(db: Session) -> str:
     return source
 
 
+KEYWORD_SELLER_OPTION_FIELDS = ("brand", "model", "keyword", "condition")
+
+
+def _keyword_seller_scope(
+    *,
+    filter_mode: str | None,
+    brand: str | None,
+    model: str | None,
+    keyword: str | None,
+    condition: str | None,
+):
+    """Chuan hoa + validate scope. Tra 400 thay vi fallback sang mode khac.
+
+    ``build_scope`` chi giu lai gia tri cua mode dang active, nen brand/model
+    KHONG the ro ri vao request mode keyword va nguoc lai.
+    """
+    try:
+        return build_scope(
+            filter_mode=filter_mode,
+            brand=brand,
+            model=model,
+            keyword=keyword,
+            condition=condition,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _keyword_seller_payload(
     db: Session,
     *,
-    keyword: str,
+    scope,
     marketplaces: list[str] | None,
     date_from: date | None,
     date_to: date | None,
@@ -1522,18 +1551,22 @@ def _keyword_seller_payload(
     include_all_roles: bool,
 ) -> dict:
     source = _keyword_seller_source(db)
-    observations = fetch_keyword_observations(
+    observations = fetch_scope_observations(
         db,
-        keyword=keyword,
+        scope=scope,
         source=source,
         marketplaces=marketplaces,
         date_from=date_from,
         date_to=date_to,
     )
     threshold = settings.hqa_keyword_seller_min_price if min_price is None else min_price
-    payload = build_keyword_payload(
+    payload = build_analytics_payload(
         observations,
-        keyword=keyword,
+        filter_mode=scope.filter_mode,
+        brand=scope.brand,
+        model=scope.model,
+        keyword=scope.keyword,
+        condition=scope.condition,
         min_price=threshold,
         price_drop_warning_pct=settings.hqa_keyword_seller_price_drop_warning_pct,
         price_drop_critical_pct=settings.hqa_keyword_seller_price_drop_critical_pct,
@@ -1552,10 +1585,15 @@ def hqa_keyword_seller_keywords(
     date_to: date | None = Query(default=None),
     min_price: float | None = Query(default=None, ge=0),
     limit: int | None = Query(default=None, ge=1, le=500),
+    condition: str | None = Query(default=None),
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.dashboard.view")),
 ):
-    """Danh sach keyword cho selector, kem so seller / listing / median."""
+    """Danh sach keyword cho card strip (Mode B), kem seller / listing / median.
+
+    Dung CHUNG matcher voi /analytics nen so lieu tren card va trong detail
+    khong con lech nhau.
+    """
     source = _keyword_seller_source(db)
     try:
         items = fetch_keyword_options(
@@ -1566,16 +1604,69 @@ def hqa_keyword_seller_keywords(
             date_to=date_to,
             min_price=settings.hqa_keyword_seller_min_price if min_price is None else min_price,
             limit=limit or settings.hqa_keyword_seller_keyword_limit,
+            condition=condition,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"items": items, "total": len(items), "source": source}
 
 
+@app.get("/internal/v1/hqa/keyword-seller/filter-options")
+def hqa_keyword_seller_filter_options(
+    field: str = Query(..., min_length=1),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+    search: str | None = None,
+    brand: str | None = None,
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    claims: dict = Depends(require_permission("hqa.dashboard.view")),
+):
+    """Option cho Brand / Model / Keyword / Condition cua Dashboard.
+
+    - Toan bo gia tri lay tu DISTINCT cot tuong ung tren database that.
+      KHONG co danh sach hardcode, KHONG mock, KHONG fallback tinh.
+    - Tai su dung nguyen ``fetch_all_listings_filter_option_page`` cua
+      All Listings nen search / paging / has_more hoan toan giong nhau.
+    - ``brand`` chi co y nghia khi ``field=model`` (Model phu thuoc Brand).
+    """
+    normalized_field = (field or "").strip().lower()
+
+    if normalized_field not in KEYWORD_SELLER_OPTION_FIELDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "field phai la mot trong "
+                f"{list(KEYWORD_SELLER_OPTION_FIELDS)}"
+            ),
+        )
+
+    try:
+        return fetch_all_listings_filter_option_page(
+            db,
+            field=normalized_field,
+            page=page,
+            page_size=page_size,
+            search=search,
+            from_date=from_date,
+            to_date=to_date,
+            marketplace=None,
+            # Chi Model moi bi rang buoc theo Brand dang chon.
+            brand=brand if normalized_field == "model" else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/internal/v1/hqa/keyword-seller/analytics")
 def hqa_keyword_seller_analytics(
     request: Request,
-    keyword: str = Query(..., min_length=1),
+    filter_mode: str = Query(default="brand_model"),
+    brand: str | None = Query(default=None),
+    model: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+    condition: str | None = Query(default=None),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     min_price: float | None = Query(default=None, ge=0),
@@ -1583,11 +1674,23 @@ def hqa_keyword_seller_analytics(
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.dashboard.view")),
 ):
-    """Payload day du cua 1 keyword: KPI, seller series, bang, alert, audit."""
+    """Payload day du cua 1 scope: KPI, seller series, bang, alert, audit.
+
+    Mode A: filter_mode=brand_model + (brand va/hoac model). Thieu ca hai -> 400.
+    Mode B: filter_mode=keyword     + keyword.               Thieu keyword -> 400.
+    Khong co fallback giua hai mode.
+    """
+    scope = _keyword_seller_scope(
+        filter_mode=filter_mode,
+        brand=brand,
+        model=model,
+        keyword=keyword,
+        condition=condition,
+    )
     try:
         return _keyword_seller_payload(
             db,
-            keyword=keyword,
+            scope=scope,
             marketplaces=_get_query_list(request, "marketplace", "marketplaces"),
             date_from=date_from,
             date_to=date_to,
@@ -1601,7 +1704,11 @@ def hqa_keyword_seller_analytics(
 @app.get("/internal/v1/hqa/keyword-seller/export")
 def hqa_keyword_seller_export(
     request: Request,
-    keyword: str = Query(..., min_length=1),
+    filter_mode: str = Query(default="brand_model"),
+    brand: str | None = Query(default=None),
+    model: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+    condition: str | None = Query(default=None),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     min_price: float | None = Query(default=None, ge=0),
@@ -1609,10 +1716,17 @@ def hqa_keyword_seller_export(
     db: Session = Depends(get_db),
     claims: dict = Depends(require_permission("hqa.dashboard.view")),
 ):
+    scope = _keyword_seller_scope(
+        filter_mode=filter_mode,
+        brand=brand,
+        model=model,
+        keyword=keyword,
+        condition=condition,
+    )
     try:
         payload = _keyword_seller_payload(
             db,
-            keyword=keyword,
+            scope=scope,
             marketplaces=_get_query_list(request, "marketplace", "marketplaces"),
             date_from=date_from,
             date_to=date_to,
@@ -1625,8 +1739,8 @@ def hqa_keyword_seller_export(
     rows = build_export_rows(payload)
     if not rows:
         raise HTTPException(status_code=404, detail="No data available for export")
-    safe_keyword = "".join(ch if ch.isalnum() else "_" for ch in keyword)[:40]
-    return _to_csv_response(f"hqa_keyword_seller_{safe_keyword}.csv", rows, include_bom=True)
+    safe_scope = "".join(ch if ch.isalnum() else "_" for ch in scope.label)[:40]
+    return _to_csv_response(f"hqa_keyword_seller_{safe_scope}.csv", rows, include_bom=True)
 
 
 @app.post("/internal/v1/listings/bulk-upsert")

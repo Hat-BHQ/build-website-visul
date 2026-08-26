@@ -1,6 +1,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 
@@ -40,6 +41,37 @@ TOKEN_ALIASES = {
 
 
 PRODUCT_TERMS = {
+    "speaker",
+    "receiver",
+    "amplifier",
+    "turntable",
+    "tuner",
+    "equalizer",
+}
+
+
+# =========================================================
+# 1b. TWO-MODE FILTER (prompt Keyword/Seller Analytics)
+# =========================================================
+#
+# Dashboard chi co dung 2 mode loai tru nhau:
+#
+#   FILTER_MODE_BRAND_MODEL : Brand + Model (boundary phrase tren title)
+#   FILTER_MODE_KEYWORD     : Keyword STRICT (title == keyword, + plural)
+#
+# Hai mode KHONG duoc fallback cho nhau.
+
+FILTER_MODE_BRAND_MODEL = "brand_model"
+FILTER_MODE_KEYWORD = "keyword"
+
+FILTER_MODES = (
+    FILTER_MODE_BRAND_MODEL,
+    FILTER_MODE_KEYWORD,
+)
+
+# Chi duoc phep plural hoa final noun nam trong danh sach nay.
+# KHONG stemming generic, KHONG alias (amp != amplifier, loudspeaker != speaker).
+PLURALIZABLE_PRODUCT_TERMS = {
     "speaker",
     "receiver",
     "amplifier",
@@ -96,32 +128,247 @@ def canonical_tokens(value: Optional[str]) -> list[str]:
 # 3. EXACT BRAND / MODEL MATCH
 # =========================================================
 
-def contains_exact_phrase(
+# Mot "run" la mot cum toan chu HOAC toan so.
+# "gx4000d" -> ["gx", "4000", "d"]   |   "4311b" -> ["4311", "b"]
+_ALNUM_RUN_RE = re.compile(r"[a-z]+|[0-9]+")
+
+# Giua hai run, dau ngan cach la TUY CHON.
+# Nho vay "GX-4000D" / "GX 4000D" / "GX4000D" duoc coi la MOT model,
+# nhung KHONG lam mat bien token o hai dau cum.
+_OPTIONAL_SEPARATOR = r"[^a-z0-9]*"
+
+
+def alnum_runs(value: Optional[str]) -> list[str]:
+    """Tach text thanh cac cum toan chu / toan so, bo qua moi dau ngan cach.
+
+        "gx4000d"   -> ["gx", "4000", "d"]
+        "gx 4000d"  -> ["gx", "4000", "d"]
+        "GX-4000D"  -> ["gx", "4000", "d"]
+
+    Dung chung cho matcher VA cho SQL prefilter, de hai tang khong bao gio
+    bat dong quan diem ve mot listing.
+    """
+    return _ALNUM_RUN_RE.findall(normalize_text(value))
+
+
+@lru_cache(maxsize=4096)
+def _boundary_pattern(normalized_phrase: str):
+    runs = _ALNUM_RUN_RE.findall(normalized_phrase)
+
+    if not runs:
+        return None
+
+    body = _OPTIONAL_SEPARATOR.join(re.escape(run) for run in runs)
+
+    return re.compile(
+        rf"(?<![a-z0-9]){body}(?![a-z0-9])"
+    )
+
+
+def exact_boundary_phrase(
     title: Optional[str],
     phrase: Optional[str],
 ) -> bool:
-    if not phrase:
-        return True
+    """``phrase`` xuat hien trong ``title`` voi bien token ro rang.
 
+    Khac ``contains_exact_phrase``: phrase rong => False (khong coi la "bo qua").
+
+    Dau ngan cach GIUA cac cum chu/so la tuy chon, nen cac cach viet khac nhau
+    cua CUNG mot model duoc gom lam mot:
+
+        GX-4000D  ==  GX 4000D  ==  GX4000D
+        AU-777    ==  AU 777    ==  AU777
+        SL-1200MK2 == SL 1200 MK2
+
+    Nhung bien o HAI DAU van chat, nen khong he noi long viec phan biet model:
+
+        exact_boundary_phrase("Vintage JBL 4311B speakers", "jbl 4311b") -> True
+        exact_boundary_phrase("JBL 4311BA speakers",        "jbl 4311b") -> False
+        exact_boundary_phrase("JBL 14311B speakers",        "jbl 4311b") -> False
+        exact_boundary_phrase("JBL 4311 speakers",          "jbl 4311b") -> False
+        exact_boundary_phrase("JBL model 4311B",            "jbl 4311b") -> False
+    """
     normalized_title = normalize_text(title)
     normalized_phrase = normalize_text(phrase)
 
     if not normalized_title or not normalized_phrase:
         return False
 
-    pattern = (
-        rf"(?<![a-z0-9])"
-        rf"{re.escape(normalized_phrase)}"
-        rf"(?![a-z0-9])"
-    )
+    pattern = _boundary_pattern(normalized_phrase)
 
-    return bool(
-        re.search(
-            pattern,
-            normalized_title,
-            flags=re.IGNORECASE,
+    if pattern is None:
+        return False
+
+    return bool(pattern.search(normalized_title))
+
+
+def contains_exact_phrase(
+    title: Optional[str],
+    phrase: Optional[str],
+) -> bool:
+    """Ban "lenient": phrase rong nghia la khong rang buoc -> True.
+
+    Giu nguyen semantics cu vi ``match_listing`` dang dua vao no.
+    """
+    if not phrase:
+        return True
+
+    return exact_boundary_phrase(title, phrase)
+
+
+# =========================================================
+# 3b. MODE A — BRAND + MODEL
+# =========================================================
+
+def match_brand_model_title(
+    title: Optional[str],
+    *,
+    brand: Optional[str] = None,
+    model: Optional[str] = None,
+) -> bool:
+    """Mode A: validate title theo Brand / Model.
+
+    A1. Brand + Model : title phai chua cum ``brand + " " + model`` LIEN NHAU.
+    A2. Brand only    : title phai chua brand voi bien token exact.
+    A3. Model only    : title phai chua model voi bien token exact.
+    A4. Khong co ca hai -> False (khong duoc fallback ve "match tat ca").
+    """
+    normalized_brand = normalize_text(brand)
+    normalized_model = normalize_text(model)
+
+    if not normalized_brand and not normalized_model:
+        return False
+
+    if normalized_brand and normalized_model:
+        # Khong cho token nam giua Brand va Model.
+        return exact_boundary_phrase(
+            title,
+            f"{normalized_brand} {normalized_model}",
         )
-    )
+
+    if normalized_brand:
+        return exact_boundary_phrase(title, normalized_brand)
+
+    return exact_boundary_phrase(title, normalized_model)
+
+
+# =========================================================
+# 3c. MODE B — KEYWORD STRICT
+# =========================================================
+
+def keyword_phrase_variants(keyword: Optional[str]) -> list[str]:
+    """Cac dang cum tu duoc chap nhan cua keyword.
+
+    Chi bien the DUY NHAT duoc phep: final noun co "s" hoac khong co "s",
+    va chi khi final noun nam trong ``PLURALIZABLE_PRODUCT_TERMS``.
+
+        "JBL 4311B speaker"  -> ["jbl 4311b speaker", "jbl 4311b speakers"]
+        "JBL 4311B speakers" -> ["jbl 4311b speakers", "jbl 4311b speaker"]
+        "JBL 4311B"          -> ["jbl 4311b"]
+
+    KHONG stemming generic. KHONG alias (amp != amplifier,
+    loudspeaker != speaker, stereo receiver != receiver).
+    """
+    normalized = normalize_text(keyword)
+
+    if not normalized:
+        return []
+
+    tokens = normalized.split()
+
+    if not tokens:
+        return []
+
+    last = tokens[-1]
+    head = tokens[:-1]
+
+    singular = last[:-1] if last.endswith("s") else last
+
+    if singular not in PLURALIZABLE_PRODUCT_TERMS:
+        return [normalized]
+
+    variants = [
+        " ".join(head + [singular]),
+        " ".join(head + [singular + "s"]),
+    ]
+
+    # Giu dang goc dung dau danh sach de match nhanh truong hop pho bien nhat.
+    ordered = [normalized] + [
+        variant for variant in variants if variant != normalized
+    ]
+
+    return ordered
+
+
+def match_keyword_strict(
+    title: Optional[str],
+    keyword: Optional[str],
+) -> bool:
+    """Mode B: title phai chua NGUYEN CUM keyword, lien mach, dung bien token.
+
+    "Strict" o day nghia la:
+    - Cac token cua keyword phai DINH LIEN NHAU, khong duoc chen them token
+      nao vao GIUA cum.
+    - Final noun duoc phep co "s" hoac khong co "s" (chi voi product term).
+    - Khong fuzzy, khong Levenshtein, khong alias, khong semantic.
+
+    Text dung TRUOC hoac SAU cum keyword thi duoc phep.
+
+        match_keyword_strict("JBL 4311B speaker",          "JBL 4311B speaker") -> True
+        match_keyword_strict("JBL 4311B speakers",         "JBL 4311B speaker") -> True
+        match_keyword_strict("Vintage JBL 4311B speaker",  "JBL 4311B speaker") -> True
+        match_keyword_strict("Vintage JBL 4311B speakers", "JBL 4311B speaker") -> True
+        match_keyword_strict("JBL 4311B speaker pair",     "JBL 4311B speaker") -> True
+
+        match_keyword_strict("JBL 4311B studio speaker",   "JBL 4311B speaker") -> False
+        match_keyword_strict("JBL 4311B loudspeaker",      "JBL 4311B speaker") -> False
+        match_keyword_strict("JBL model 4311B speaker",    "JBL 4311B speaker") -> False
+        match_keyword_strict("Sansui AU-777 amp",   "Sansui AU-777 amplifier") -> False
+    """
+    normalized_title = normalize_text(title)
+
+    if not normalized_title:
+        return False
+
+    for variant in keyword_phrase_variants(keyword):
+        if exact_boundary_phrase(normalized_title, variant):
+            return True
+
+    return False
+
+
+# =========================================================
+# 3d. DISPATCH THEO MODE
+# =========================================================
+
+def match_listing_by_mode(
+    *,
+    title: Optional[str],
+    filter_mode: Optional[str],
+    brand: Optional[str] = None,
+    model: Optional[str] = None,
+    keyword: Optional[str] = None,
+) -> bool:
+    """Entry point duy nhat cho matcher 2 mode.
+
+    Khong co fallback giua 2 mode; mode khong hop le -> False.
+    """
+    mode = (filter_mode or "").strip().lower()
+
+    if mode == FILTER_MODE_BRAND_MODEL:
+        return match_brand_model_title(
+            title,
+            brand=brand,
+            model=model,
+        )
+
+    if mode == FILTER_MODE_KEYWORD:
+        return match_keyword_strict(
+            title,
+            keyword,
+        )
+
+    return False
 
 
 # =========================================================
