@@ -340,6 +340,56 @@ def build_axis(listings: list[dict]) -> list[date]:
     return sorted(dates)
 
 
+def build_lifecycle_axis(
+    listings: list[dict],
+    *,
+    latest_snapshot: date,
+    min_price: float,
+    eligible_roles: set[str],
+) -> list[date]:
+    """Timeline cho chế độ ``lifecycle``.
+
+    Vòng đời listing bắt đầu từ ``published_at``. Nếu nguồn dữ liệu không có
+    published_at thì mới fallback về ``first_seen``. Tuy nhiên published_at chỉ
+    mở rộng TRỤC THỜI GIAN; tuyệt đối không backfill giá trước snapshot đầu tiên.
+
+    Chỉ listing có role hợp lệ và từng có ít nhất một snapshot giá > min_price
+    mới được phép mở rộng lifecycle axis. Nhờ vậy component/manual/accessory hoặc
+    listing luôn nằm dưới ngưỡng không kéo chart lùi về một mốc không liên quan.
+    """
+    dates: set[date] = set()
+
+    for listing in listings:
+        if listing.get("exclude_flag") or listing.get("role") not in eligible_roles:
+            continue
+
+        eligible_snapshot_dates: list[date] = []
+        for snapshot_date in listing.get("snapshot_dates") or []:
+            if snapshot_date > latest_snapshot:
+                continue
+            snapshot = listing["snapshots"].get(snapshot_date) or {}
+            price = snapshot.get("price")
+            if price is not None and price > min_price:
+                eligible_snapshot_dates.append(snapshot_date)
+
+        if not eligible_snapshot_dates:
+            continue
+
+        # Giữ các snapshot thật để đường giá vẫn chỉ dựa trên dữ liệu đã quan sát.
+        dates.update(
+            snapshot_date
+            for snapshot_date in (listing.get("snapshot_dates") or [])
+            if snapshot_date <= latest_snapshot
+        )
+
+        lifecycle_start = listing.get("published_at") or listing.get("first_seen")
+        if lifecycle_start is not None and lifecycle_start <= latest_snapshot:
+            dates.add(lifecycle_start)
+
+    # Fallback an toàn: nếu không có listing đủ điều kiện thì giữ behavior cũ.
+    return sorted(dates) if dates else build_axis(listings)
+
+
 def build_seller_series(seller_listings: list[dict], axis: list[date], *, min_price: float, eligible_roles: set[str]):
     """Chuoi gia dai dien cua 1 seller doc theo truc thoi gian."""
     points = []
@@ -762,6 +812,7 @@ def build_analytics_payload(
             "keyword": label,
             "currency": "USD",
             "axis": [],
+            "lifecycle_axis": [],
             "sellers": [],
             "series": [],
             "alerts": [],
@@ -790,6 +841,12 @@ def build_analytics_payload(
         }
 
     latest = axis[-1]
+    lifecycle_axis = build_lifecycle_axis(
+        listings,
+        latest_snapshot=latest,
+        min_price=min_price,
+        eligible_roles=roles,
+    )
 
     listings_by_seller: dict[str, list[dict]] = defaultdict(list)
     for listing in listings:
@@ -878,6 +935,7 @@ def build_analytics_payload(
         "currency": currency or "USD",
         "generated_for": latest,
         "axis": axis,
+        "lifecycle_axis": lifecycle_axis,
         "sellers": seller_summaries,
         "series": series,
         "alerts": alerts,

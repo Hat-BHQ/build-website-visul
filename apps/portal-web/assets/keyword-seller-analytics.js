@@ -32,7 +32,7 @@
     periods: [
       { key: 'week', label: 'Tuần gần nhất' },
       { key: 'month', label: 'Tháng gần nhất' },
-      { key: 'lifecycle', label: 'Vòng đời' },
+      { key: 'lifecycle', label: 'Vòng đời listing' },
     ],
     sellerColors: [
       '#f97316', '#2563eb', '#7c3aed', '#0891b2', '#c026d3', '#0f766e',
@@ -232,7 +232,8 @@
   function periodDescription(allDates, period) {
     var visible = windowDates(allDates, period);
     if (!visible.length) return 'Không có dữ liệu thời gian.';
-    if (period === 'lifecycle') return 'Toàn bộ vòng đời: ' + visible[0] + ' → ' + visible[visible.length - 1];
+    if (period === 'lifecycle') return 'Vòng đời listing: ' + visible[0] + ' → ' + visible[visible.length - 1]
+      + ' · mốc bắt đầu ưu tiên ngày đăng; giá chỉ hiển thị từ snapshot đầu tiên.';
     if (period === 'month') return 'Tháng gần nhất có dữ liệu: ' + visible[visible.length - 1].slice(0, 7);
     var start = isoWeekStart(visible[visible.length - 1]);
     var end = new Date(start); end.setUTCDate(start.getUTCDate() + 6);
@@ -262,6 +263,7 @@
       keyword: payload.keyword || '',
       currency: payload.currency || CONFIG.currency,
       axis: uniqueSortedDates(payload.axis || []),
+      lifecycleAxis: uniqueSortedDates(payload.lifecycle_axis || payload.axis || []),
       summary: payload.summary || {},
       sellers: payload.sellers || [],
       series: payload.series || [],
@@ -270,6 +272,13 @@
       source: payload.source || '',
       minPrice: Number(payload.min_price == null ? CONFIG.minPrice : payload.min_price),
     };
+  }
+
+  function axisForPeriod(payload, period) {
+    if (period === 'lifecycle' && payload && payload.lifecycleAxis && payload.lifecycleAxis.length) {
+      return payload.lifecycleAxis;
+    }
+    return payload && payload.axis ? payload.axis : [];
   }
 
   // FIX: old code returned keywords[0] when keyword was not found. That made every
@@ -288,7 +297,7 @@
   }
 
   function visiblePoints(payload, sellerName, period) {
-    var allowed = new Set(windowDates(payload.axis, period));
+    var allowed = new Set(windowDates(axisForPeriod(payload, period), period));
     var series = seriesForSeller(payload, sellerName);
     return (series && series.points || [])
       .map(function (point) {
@@ -403,7 +412,7 @@
   }
 
   function buildPeriodAlerts(payload, period) {
-    var visible = windowDates(payload.axis, period);
+    var visible = windowDates(axisForPeriod(payload, period), period);
     var alerts = [];
     (payload.sellers || []).forEach(function (seller) {
       (seller.events || []).forEach(function (event) {
@@ -482,7 +491,7 @@
       medianChangePct: medianChange,
       minSeller: minSeller,
       maxSeller: maxSeller,
-      visibleDates: windowDates(payload.axis, period),
+      visibleDates: windowDates(axisForPeriod(payload, period), period),
     };
   }
 
@@ -1220,7 +1229,7 @@ function sellerColorByName(payload, sellerName) {
     var width = 920; var height = 390; var left = 72; var right = 24; var top = 24; var bottom = 48;
     var allValues = chartSellers.flatMap(function (row) { return row.points.map(function (p) { return Number(p.price); }); }).filter(Number.isFinite);
     if (!dates.length || !allValues.length) {
-      return '<section class="ks-chart-panel ks-card"><div class="ks-chart-head"><div><h2>Xu hướng giá theo seller</h2><p>' + escapeHtml(periodDescription(payload.axis, view.period)) + '</p></div></div><div class="ks-chart-empty">Không có dữ liệu giá trong phạm vi thời gian này.</div></section>';
+      return '<section class="ks-chart-panel ks-card"><div class="ks-chart-head"><div><h2>Xu hướng giá theo seller</h2><p>' + escapeHtml(periodDescription(axisForPeriod(payload, view.period), view.period)) + '</p></div></div><div class="ks-chart-empty">Không có dữ liệu giá trong phạm vi thời gian này.</div></section>';
     }
     var min = Math.min.apply(null, allValues); var max = Math.max.apply(null, allValues);
     var pad = Math.max((max - min) * 0.08, 50); min = Math.max(0, min - pad); max += pad;
@@ -1269,10 +1278,10 @@ function sellerColorByName(payload, sellerName) {
     });
 
     return '<section class="ks-chart-panel ks-card">'
-      + '<div class="ks-chart-head"><div><h2>Xu hướng giá theo seller</h2><p>Mỗi line = 1 seller · giá đại diện = snapshot gần nhất của listing đủ điều kiện được đăng mới nhất.</p><small>' + escapeHtml(periodDescription(payload.axis, view.period)) + '</small></div>'
+      + '<div class="ks-chart-head"><div><h2>Xu hướng giá theo seller</h2><p>Mỗi line = 1 seller · giá đại diện = snapshot gần nhất của listing đủ điều kiện được đăng mới nhất.</p><small>' + escapeHtml(periodDescription(axisForPeriod(payload, view.period), view.period)) + '</small></div>'
       + '<div class="ks-chart-kpi"><small>Median seller hiện tại</small><strong>' + formatCurrency(overview.medianPrice, payload.currency) + '</strong></div></div>'
       + '<div class="ks-chart-wrap"><svg class="ks-chart-svg" viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="Xu hướng giá theo seller">' + svg + '</svg></div>'
-      + '<div class="ks-chart-note">Biểu đồ hiển thị tối đa ' + CONFIG.maxChartSellers + ' seller ưu tiên theo mức biến động, đồng thời giữ seller min/max để tránh quá rối. Hình thoi cam = thời điểm đổi listing đại diện; rê chuột vào điểm để xem Listing ID.</div>'
+      + '<div class="ks-chart-note">Biểu đồ hiển thị tối đa ' + CONFIG.maxChartSellers + ' seller ưu tiên theo mức biến động, đồng thời giữ seller min/max để tránh quá rối. Ở Vòng đời listing, trục thời gian bắt đầu từ ngày publish nhưng đường giá chỉ bắt đầu khi hệ thống có snapshot thật; không backfill giá về ngày đăng. Hình thoi cam = thời điểm đổi listing đại diện; rê chuột vào điểm để xem Listing ID.</div>'
       + '</section>';
   }
 
@@ -1367,9 +1376,13 @@ function sellerColorByName(payload, sellerName) {
       + '<section class="ks-drawer-section"><h3>Listing đang theo dõi</h3>'
       + (seller.listings || []).map(function (listing) {
         var representative = listing.listing_id === repId;
+        var publishedAt = normalizeDate(listing.published_at);
+        var firstSeen = normalizeDate(listing.first_seen);
         return '<article class="ks-listing-card ' + (representative ? 'is-representative' : '') + '"><div class="ks-listing-card-head"><div><b>' + escapeHtml(listing.listing_id) + '</b><small>' + escapeHtml(listing.title || '') + '</small></div><span class="ks-badge ' + (representative ? 'ks-badge--rep' : 'ks-badge--history') + '">' + (representative ? 'Đại diện' : 'History') + '</span></div>'
           + '<div class="ks-spark">' + sparklineSvg(listing, payload) + '</div>'
-          + '<div class="ks-listing-meta">First seen: ' + escapeHtml(normalizeDate(listing.first_seen || listing.published_at)) + ' · Current/last: ' + formatCurrency(listing.current_price, payload.currency) + ' · ' + escapeHtml(listing.status || 'UNKNOWN') + '</div>'
+          + '<div class="ks-listing-meta">Ngày đăng: ' + escapeHtml(publishedAt || '—')
+          + ' · Theo dõi từ: ' + escapeHtml(firstSeen || '—')
+          + ' · Current/last: ' + formatCurrency(listing.current_price, payload.currency) + ' · ' + escapeHtml(listing.status || 'UNKNOWN') + '</div>'
           + (listing.url ? '<a class="ks-open-link" href="' + escapeHtml(listing.url) + '" target="_blank" rel="noopener noreferrer">Mở listing ↗</a>' : '')
           + '</article>';
       }).join('') + '</section>'
@@ -1645,7 +1658,7 @@ function sellerColorByName(payload, sellerName) {
     var overview = buildOverview(payload, view.period);
     var header = [
       'filter_mode', 'scope', 'brand_filter', 'model_filter', 'keyword_filter', 'condition_filter',
-      'seller', 'listing_id', 'listing_title', 'first_seen', 'current_price', 'status',
+      'seller', 'listing_id', 'listing_title', 'published_at', 'first_seen', 'current_price', 'status',
       'eligible', 'representative', 'change_pct', 'listing_url',
     ];
     var rows = [header];
@@ -1660,7 +1673,8 @@ function sellerColorByName(payload, sellerName) {
           view.keyword || '',
           view.condition || '',
           seller.seller, listing.listing_id, listing.title || '',
-          listing.first_seen || listing.published_at || '', listing.current_price,
+          listing.published_at || '', listing.first_seen || '',
+          listing.current_price,
           listing.status || '', listing.eligible ? 'yes' : 'no',
           sellerRow && sellerRow.representativeListingId === listing.listing_id ? 'yes' : 'no',
           sellerRow ? sellerRow.changePct : '', listing.url || '',

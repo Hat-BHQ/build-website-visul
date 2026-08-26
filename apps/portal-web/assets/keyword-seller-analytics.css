@@ -268,11 +268,10 @@
   font-weight: 500;
 }
 .ks-keyword-card em {
-  font-size: 9px;
+  font-size: 9.5px;
   color: var(--ks-orange-strong);
   font-style: normal;
   font-weight: 700;
-  font-family: var(--font-pri);
 }
 .ks-strip-note {
   font-size: 9.5px;
@@ -379,7 +378,6 @@
   font-size: 11px;
   color: var(--ks-muted);
   text-align: center;
-  font-family: var(--font-pri);
 }
 
 .ks-chart-panel {
@@ -953,17 +951,11 @@
     gap: 12px;
     padding: 12px;
   }
-  .ks-toolbar-top {
-    grid-template-columns: minmax(220px, 0.72fr) minmax(420px, 1.28fr);
-  }
+
   .ks-toolbar-cell--keyword {
     grid-column: 1 / -1;
   }
-  .ks-toolbar-bottom {
-    grid-template-columns:
-      minmax(280px, 1.2fr) minmax(180px, 0.8fr) minmax(320px, 1.35fr)
-      max-content;
-  }
+
   .ks-toolbar-actions {
     justify-content: flex-end;
   }
@@ -1146,7 +1138,7 @@
 .ks-toolbar-cell--actions .ks-export-button {
   min-height: 54px;
 }
-@media (max-width: 1320px) and (min-width: 761px) {
+@media (max-width: 1320px) and (min-width: 1024px) {
   .ks-toolbar-top {
     grid-template-columns: minmax(230px, 0.72fr) minmax(410px, 1.18fr) minmax(
         360px,
@@ -1160,5 +1152,12 @@
   }
   .ks-export-button {
     padding: 0 11px !important;
+  }
+}
+
+@media (max-width: 1023px) {
+  .ks-toolbar-top,
+  .ks-toolbar-bottom {
+    grid-template-columns: 1fr;
   }
 }
