@@ -35,7 +35,7 @@ import re
 from statistics import median as _median
 from typing import Any, Iterable
 
-CLASSIFIER_VERSION = "hqa-role-v1"
+CLASSIFIER_VERSION = "hqa-role-v2"
 
 # Central field map. Only place that knows the real column names of a listing row.
 FIELD_MAP = {
@@ -98,7 +98,7 @@ WHOLE_POSITIVE_TOKENS = (
 # Category hints. Weaker than title tokens; a "Vintage Speakers" category is a
 # whole-product *hint* but must NOT overrule a woofer/grille token in the title.
 COMPONENT_CATEGORY_HINTS = ("part", "component", "driver", "woofer", "crossover", "replacement", "repair")
-ACCESSORY_CATEGORY_HINTS = ("accessor", "grille", "grill", "cover", "stand", "mount", "bag")
+ACCESSORY_CATEGORY_HINTS = ("accessory", "accessories", "grille", "grill", "cover", "stand", "mount", "bag")
 DOC_CATEGORY_HINTS = ("manual", "literature", "book", "magazine", "brochure", "catalog", "media")
 WHOLE_CATEGORY_HINTS = ("speaker", "receiver", "amplifier", "turntable", "guitar", "home audio", "stereo", "monitor")
 
@@ -279,7 +279,7 @@ def _token_only_role(norm_title: str, norm_category: str, exclude_flag: bool) ->
     """
     if exclude_flag:
         return ROLE_IRRELEVANT
-    if _any_hit(norm_title, DOC_TOKENS) or any(h in norm_category for h in DOC_CATEGORY_HINTS):
+    if _any_hit(norm_title, DOC_TOKENS) or _any_hit(norm_category, DOC_CATEGORY_HINTS):
         return ROLE_DOC
     if _any_hit(norm_title, COMPONENT_TOKENS):
         return ROLE_COMPONENT
@@ -369,7 +369,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict
     if doc_hits:
         scores[ROLE_DOC] += W_TOKEN_STRONG
         reasons.append(f"title mentions {doc_hits[0].strip()}")
-    if any(h in norm_category for h in DOC_CATEGORY_HINTS):
+    if _any_hit(norm_category, DOC_CATEGORY_HINTS):
         scores[ROLE_DOC] += W_CATEGORY_HINT
         reasons.append("category suggests documentation/media")
 
@@ -378,7 +378,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict
     if comp_hits:
         scores[ROLE_COMPONENT] += W_TOKEN_STRONG
         reasons.append(f"title token '{comp_hits[0].strip()}' indicates a part")
-    if any(h in norm_category for h in COMPONENT_CATEGORY_HINTS):
+    if _any_hit(norm_category, COMPONENT_CATEGORY_HINTS):
         scores[ROLE_COMPONENT] += W_CATEGORY_HINT
         reasons.append("category suggests a speaker/electronic component")
 
@@ -387,7 +387,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict
     if acc_hits:
         scores[ROLE_ACCESSORY] += W_TOKEN_STRONG
         reasons.append(f"title token '{acc_hits[0].strip()}' indicates an accessory")
-    if any(h in norm_category for h in ACCESSORY_CATEGORY_HINTS):
+    if _any_hit(norm_category, ACCESSORY_CATEGORY_HINTS):
         scores[ROLE_ACCESSORY] += W_CATEGORY_HINT
         reasons.append("category suggests an accessory")
 
@@ -404,7 +404,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict
         if whole_hits:
             scores[ROLE_WHOLE] += W_WHOLE_POSITIVE_TOKEN
             reasons.append(f"whole-item cue '{whole_hits[0].strip()}'")
-        if any(h in norm_category for h in WHOLE_CATEGORY_HINTS):
+        if _any_hit(norm_category, WHOLE_CATEGORY_HINTS):
             scores[ROLE_WHOLE] += W_WHOLE_CATEGORY
             reasons.append("category is a whole-product category")
 

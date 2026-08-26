@@ -1,0 +1,144 @@
+diff --git a/services/hqa-service/app/listing_classifier.py b/services/hqa-service/app/listing_classifier.py
+--- a/services/hqa-service/app/listing_classifier.py
++++ b/services/hqa-service/app/listing_classifier.py
+@@ -33,7 +33,7 @@ import re
+ from statistics import median as _median
+ from typing import Any, Iterable
+ 
+-CLASSIFIER_VERSION = "hqa-role-v1"
++CLASSIFIER_VERSION = "hqa-role-v2"
+ 
+ # Central field map. Only place that knows the real column names of a listing row.
+ FIELD_MAP = {
+@@ -92,7 +92,7 @@ WHOLE_POSITIVE_TOKENS = (
+ # Category hints. Weaker than title tokens; a "Vintage Speakers" category is a
+ # whole-product *hint* but must NOT overrule a woofer/grille token in the title.
+ COMPONENT_CATEGORY_HINTS = ("part", "component", "driver", "woofer", "crossover", "replacement", "repair")
+-ACCESSORY_CATEGORY_HINTS = ("accessor", "grille", "grill", "cover", "stand", "mount", "bag")
++ACCESSORY_CATEGORY_HINTS = ("accessory", "accessories", "grille", "grill", "cover", "stand", "mount", "bag")
+ DOC_CATEGORY_HINTS = ("manual", "literature", "book", "magazine", "brochure", "catalog", "media")
+ WHOLE_CATEGORY_HINTS = ("speaker", "receiver", "amplifier", "turntable", "guitar", "home audio", "stereo", "monitor")
+ 
+@@ -275,7 +275,7 @@ def _token_only_role(norm_title: str, norm_category: str, exclude_flag: bool) ->
+     """
+     if exclude_flag:
+         return ROLE_IRRELEVANT
+-    if _any_hit(norm_title, DOC_TOKENS) or any(h in norm_category for h in DOC_CATEGORY_HINTS):
++    if _any_hit(norm_title, DOC_TOKENS) or _any_hit(norm_category, DOC_CATEGORY_HINTS):
+         return ROLE_DOC
+     if _any_hit(norm_title, COMPONENT_TOKENS):
+         return ROLE_COMPONENT
+@@ -367,7 +367,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict:
+     if doc_hits:
+         scores[ROLE_DOC] += W_TOKEN_STRONG
+         reasons.append(f"title mentions {doc_hits[0].strip()}")
+-    if any(h in norm_category for h in DOC_CATEGORY_HINTS):
++    if _any_hit(norm_category, DOC_CATEGORY_HINTS):
+         scores[ROLE_DOC] += W_CATEGORY_HINT
+         reasons.append("category suggests documentation/media")
+ 
+@@ -376,7 +376,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict:
+     if comp_hits:
+         scores[ROLE_COMPONENT] += W_TOKEN_STRONG
+         reasons.append(f"title token '{comp_hits[0].strip()}' indicates a part")
+-    if any(h in norm_category for h in COMPONENT_CATEGORY_HINTS):
++    if _any_hit(norm_category, COMPONENT_CATEGORY_HINTS):
+         scores[ROLE_COMPONENT] += W_CATEGORY_HINT
+         reasons.append("category suggests a speaker/electronic component")
+ 
+@@ -385,7 +385,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict:
+     if acc_hits:
+         scores[ROLE_ACCESSORY] += W_TOKEN_STRONG
+         reasons.append(f"title token '{acc_hits[0].strip()}' indicates an accessory")
+-    if any(h in norm_category for h in ACCESSORY_CATEGORY_HINTS):
++    if _any_hit(norm_category, ACCESSORY_CATEGORY_HINTS):
+         scores[ROLE_ACCESSORY] += W_CATEGORY_HINT
+         reasons.append("category suggests an accessory")
+ 
+@@ -400,7 +400,7 @@ def classify_listing_role(row: Any, product_context: dict | None = None) -> dict:
+         if whole_hits:
+             scores[ROLE_WHOLE] += W_WHOLE_POSITIVE_TOKEN
+             reasons.append(f"whole-item cue '{whole_hits[0].strip()}'")
+-        if any(h in norm_category for h in WHOLE_CATEGORY_HINTS):
++        if _any_hit(norm_category, WHOLE_CATEGORY_HINTS):
+             scores[ROLE_WHOLE] += W_WHOLE_CATEGORY
+             reasons.append("category is a whole-product category")
+ 
+diff --git a/services/hqa-service/tests/test_listing_classifier.py b/services/hqa-service/tests/test_listing_classifier.py
+new file mode 100644
+--- /dev/null
++++ b/services/hqa-service/tests/test_listing_classifier.py
+@@ -0,0 +1,73 @@
++from app.listing_classifier import (
++    ROLE_COMPONENT,
++    ROLE_WHOLE,
++    classify_listing_role,
++)
++
++
++def _row(*, title: str, category: str, price: float = 900.0) -> dict:
++    return {
++        "listing_title": title,
++        "category_name": category,
++        "category": category,
++        "brand": "JBL",
++        "model": "4311B",
++        "price": price,
++        "exclude_flag": False,
++    }
++
++
++def test_home_speakers_subwoofers_does_not_treat_woofer_as_substring():
++    result = classify_listing_role(
++        _row(
++            title=(
++                "JBL 4311B Speakers - Local Pickup Only Or "
++                "You Arrange Shipping"
++            ),
++            category="Home Speakers & Subwoofers",
++        ),
++        {"reference_median": 1800.0},
++    )
++
++    assert result["listing_role"] == ROLE_WHOLE
++    assert result["eligible_for_market_analytics"] is True
++    assert "category suggests a speaker/electronic component" not in result["role_reasons"]
++
++
++def test_real_woofer_title_remains_component_in_speaker_category():
++    result = classify_listing_role(
++        _row(
++            title="JBL 4311B Replacement Woofer",
++            category="Home Speakers & Subwoofers",
++        ),
++        {"reference_median": 1800.0},
++    )
++
++    assert result["listing_role"] == ROLE_COMPONENT
++    assert result["eligible_for_market_analytics"] is False
++
++
++def test_plural_woofer_category_still_matches_component_boundary():
++    result = classify_listing_role(
++        _row(
++            title="JBL 4311B Audio Item",
++            category="Replacement Woofers",
++        ),
++    )
++
++    assert result["listing_role"] == ROLE_COMPONENT
++    assert result["eligible_for_market_analytics"] is False
++
++
++def test_subwoofer_word_is_not_a_woofer_component_token():
++    result = classify_listing_role(
++        _row(
++            title="JBL Powered Subwoofer",
++            category="Home Speakers & Subwoofers",
++        ),
++        {"reference_median": 900.0},
++    )
++
++    assert result["listing_role"] == ROLE_WHOLE
++    assert result["eligible_for_market_analytics"] is True
++    assert "category suggests a speaker/electronic component" not in result["role_reasons"]
