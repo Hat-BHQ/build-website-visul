@@ -59,10 +59,9 @@
 
 .ks-toolbar {
   display: grid;
-  grid-template-columns: minmax(240px, 1.5fr) minmax(170px, 0.9fr) minmax(
-      150px,
-      0.72fr
-    ) auto auto;
+  grid-template-columns:
+    minmax(240px, 1.5fr) minmax(170px, 0.9fr) minmax(150px, 0.72fr)
+    auto auto;
   gap: 10px;
   margin-bottom: 12px;
   align-items: stretch;
@@ -749,6 +748,9 @@
   padding: 3px 7px;
   border-radius: 999px;
   white-space: nowrap;
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 .ks-badge--rep {
   background: #ffedd5;
@@ -758,6 +760,12 @@
   background: #eff6ff;
   color: #1d4ed8;
 }
+
+#ks-keyword-trigger {
+  width: 100%;
+  background: transparent;
+}
+
 .ks-spark {
   height: 58px;
   margin: 8px 0;

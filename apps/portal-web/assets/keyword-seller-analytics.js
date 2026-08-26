@@ -6,7 +6,7 @@
  * Seller representative price = latest snapshot of the newest eligible listing.
  *
  * UI fixes in this version:
- * - native keyword <select> + clickable keyword cards
+ * - searchable single-select keyword picker + clickable keyword cards
  * - keyword cards in one horizontal scrolling row
  * - default period = latest ISO week; latest month; lifecycle
  * - period-aware seller deltas / alerts / overview
@@ -61,12 +61,15 @@
   };
 
   var API_BASE = '/api/v1/hqa/keyword-seller';
+  var keywordSelectorGlobalListenersBound = false;
 
   var view = {
     host: null,
     apiClient: null,
     keywordOptions: [],
     keyword: '',
+    keywordSelectorOpen: false,
+    keywordSearch: '',
     period: 'week',
     role: 'whole_product',
     minPrice: CONFIG.minPrice,
@@ -534,11 +537,123 @@
       + '<b>' + escapeHtml(option.keyword) + '</b>' + detail + '</button>';
   }
 
+  function normalizedKeywordSearch(value) {
+    return String(value == null ? '' : value)
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function filteredKeywordOptions() {
+    var query = normalizedKeywordSearch(view.keywordSearch);
+    if (!query) return view.keywordOptions.slice();
+    return view.keywordOptions.filter(function (item) {
+      return normalizedKeywordSearch(item.keyword).includes(query);
+    });
+  }
+
+  function keywordOptionMarkup(item) {
+    var selected = item.keyword === view.keyword;
+    return '<button type="button" class="lazy-option-row ks-keyword-option '
+      + (selected ? 'is-selected' : '')
+      + '" data-ks-keyword-option="' + escapeHtml(item.keyword)
+      + '" role="option" aria-selected="' + (selected ? 'true' : 'false') + '">'
+      + '<span>' + escapeHtml(item.keyword) + '</span>'
+      + '</button>';
+  }
+
+  function renderKeywordSearchSelect() {
+    var filtered = filteredKeywordOptions();
+    var selectedLabel = view.keyword
+      ? '<span class="multi-select-chip">' + escapeHtml(view.keyword) + '</span>'
+      : '<span class="multi-select-placeholder">Chọn keyword</span>';
+
+    return '<div class="ks-field ks-keyword-field">'
+      + '<span>Keyword</span>'
+      + '<div class="multi-select ks-keyword-select-wrap" data-ks-keyword-select-wrap style="position:relative">'
+      + '<button type="button" class="multi-select-trigger ks-keyword-trigger" id="ks-keyword-trigger" '
+      + 'data-ks-keyword-trigger aria-haspopup="listbox" aria-expanded="' + (view.keywordSelectorOpen ? 'true' : 'false') + '">'
+      + '<span class="multi-select-trigger-content" title="' + escapeHtml(view.keyword || 'Chọn keyword') + '">' + selectedLabel + '</span>'
+      + '<span class="multi-select-chevron" aria-hidden="true">▾</span>'
+      + '</button>'
+      + '<div class="multi-select-dropdown ks-keyword-dropdown" id="ks-keyword-dropdown" '
+      + (view.keywordSelectorOpen ? '' : 'hidden')
+      + ' style="z-index:10000">'
+      + '<div class="multi-select-search"><input type="search" id="ks-keyword-search" '
+      + 'placeholder="Search keyword..." autocomplete="off" spellcheck="false" value="' + escapeHtml(view.keywordSearch) + '"></div>'
+      + '<div class="multi-select-actions">'
+      + '<span class="multi-select-actions-hint">Select one value</span>'
+      + '<button type="button" id="ks-keyword-clear">Clear</button>'
+      + '</div>'
+      + '<div class="multi-select-options ks-keyword-options" id="ks-keyword-options" role="listbox" aria-label="Keyword">'
+      + (filtered.length
+        ? filtered.map(keywordOptionMarkup).join('')
+        : '<div class="multi-select-empty">Không tìm thấy keyword phù hợp.</div>')
+      + '</div>'
+      + '<div class="multi-select-footer"><span class="multi-select-complete" id="ks-keyword-result-count">'
+      + (filtered.length === view.keywordOptions.length
+        ? 'Đã tải hết dữ liệu · ' + formatCount(filtered.length) + ' keyword'
+        : formatCount(filtered.length) + ' / ' + formatCount(view.keywordOptions.length) + ' keyword')
+      + '</span></div>'
+      + '</div>'
+      + '</div>'
+      + '</div>';
+  }
+
+  function refreshKeywordSelectorOptions() {
+    if (!view.host) return;
+    var list = view.host.querySelector('#ks-keyword-options');
+    var resultCount = view.host.querySelector('#ks-keyword-result-count');
+    var filtered = filteredKeywordOptions();
+
+    if (list) {
+      list.innerHTML = filtered.length
+        ? filtered.map(keywordOptionMarkup).join('')
+        : '<div class="multi-select-empty">Không tìm thấy keyword phù hợp.</div>';
+    }
+
+    if (resultCount) {
+      resultCount.textContent = filtered.length === view.keywordOptions.length
+        ? 'Đã tải hết dữ liệu · ' + formatCount(filtered.length) + ' keyword'
+        : formatCount(filtered.length) + ' / ' + formatCount(view.keywordOptions.length) + ' keyword';
+    }
+  }
+
+  function closeKeywordSelectorDom(options) {
+    var opts = options || {};
+    view.keywordSelectorOpen = false;
+    if (opts.clearSearch !== false) view.keywordSearch = '';
+
+    if (!view.host) return;
+    var dropdown = view.host.querySelector('#ks-keyword-dropdown');
+    var trigger = view.host.querySelector('#ks-keyword-trigger');
+    var search = view.host.querySelector('#ks-keyword-search');
+
+    if (dropdown) dropdown.hidden = true;
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    if (search && opts.clearSearch !== false) search.value = '';
+  }
+
+  function ensureKeywordSelectorGlobalListeners() {
+    if (keywordSelectorGlobalListenersBound) return;
+    keywordSelectorGlobalListenersBound = true;
+
+    document.addEventListener('click', function (event) {
+      if (!view.keywordSelectorOpen || !view.host) return;
+      var wrapper = view.host.querySelector('[data-ks-keyword-select-wrap]');
+      if (wrapper && wrapper.contains(event.target)) return;
+      closeKeywordSelectorDom({ clearSearch: true });
+    });
+
+    document.addEventListener('keydown', function (event) {
+      if (event.key !== 'Escape' || !view.keywordSelectorOpen) return;
+      closeKeywordSelectorDom({ clearSearch: true });
+    });
+  }
+
   function renderToolbar() {
     return '<div class="ks-toolbar">'
-      + '<label class="ks-field"><span>Keyword</span><select id="ks-keyword-select">'
-      + view.keywordOptions.map(function (item) { return '<option value="' + escapeHtml(item.keyword) + '" ' + (item.keyword === view.keyword ? 'selected' : '') + '>' + escapeHtml(item.keyword) + '</option>'; }).join('')
-      + '</select></label>'
+      + renderKeywordSearchSelect()
       + '<label class="ks-field"><span>Vai trò</span><select id="ks-role-select"><option value="whole_product" ' + (view.role === 'whole_product' ? 'selected' : '') + '>Whole product</option><option value="all" ' + (view.role === 'all' ? 'selected' : '') + '>Tất cả (audit)</option></select></label>'
       + '<label class="ks-field"><span>Ngưỡng giá</span><div class="ks-price-row"><b>&gt; $</b><input id="ks-min-price" type="number" min="0" step="1" value="' + escapeHtml(view.minPrice) + '"></div></label>'
       + '<div class="ks-segment" aria-label="Khoảng thời gian">'
@@ -578,7 +693,26 @@
   }
 
   function sellerColor(index) { return CONFIG.sellerColors[index % CONFIG.sellerColors.length]; }
+function sellerColorByName(payload, sellerName) {
+  var sellers = (payload && payload.sellers || [])
+    .map(function (item) {
+      return String(item.seller || '').trim();
+    })
+    .filter(Boolean)
+    .sort(function (a, b) {
+      return a.localeCompare(b);
+    });
 
+  var index = sellers.indexOf(
+    String(sellerName || '').trim()
+  );
+
+  if (index < 0) {
+    index = 0;
+  }
+
+  return sellerColor(index);
+}
   function renderChart(payload, overview) {
     var chartSellers = chooseChartSellers(overview);
     var dates = overview.visibleDates;
@@ -605,8 +739,16 @@
       if (shouldShow) svg += '<text class="ks-axis-text" x="' + x(date) + '" y="' + (height - 13) + '" text-anchor="middle">' + escapeHtml(formatDayMonth(date)) + '</text>';
     });
 
-    chartSellers.forEach(function (row, index) {
-      var color = sellerColor(index); var points = row.points.filter(function (p) { return dates.indexOf(normalizeDate(p.date)) !== -1; });
+    chartSellers.forEach(function (row) {
+  var color = sellerColorByName(
+    payload,
+    row.seller
+  );
+   var points = row.points.filter(function (p) {
+    return dates.indexOf(
+      normalizeDate(p.date)
+    ) !== -1;
+  });
       if (!points.length) return;
       var poly = points.map(function (p) { return x(normalizeDate(p.date)).toFixed(1) + ',' + y(p.price).toFixed(1); }).join(' ');
       svg += '<polyline class="ks-line" data-ks-open-seller="' + escapeHtml(row.seller) + '" points="' + poly + '" fill="none" stroke="' + color + '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"></polyline>';
@@ -639,10 +781,23 @@
     });
     return '<section class="ks-seller-section ks-card"><div class="ks-section-head"><div><h3>Seller trong keyword</h3><p>Cuộn ngang để xem thêm · click seller để mở các listing/URL song song.</p></div><span>' + formatCount(rows.length) + ' seller</span></div>'
       + '<div class="ks-seller-strip">'
-      + rows.map(function (row, i) {
-        var status = String(row.representativeStatus || '').toUpperCase();
+      + rows.map(function (row) {
+       var status = String(
+        row.representativeStatus || ''
+      ).toUpperCase();
+
+      var color = sellerColorByName(
+        payload,
+        row.seller
+      );
         return '<button type="button" class="ks-seller-card" data-ks-open-seller="' + escapeHtml(row.seller) + '">'
-          + '<div class="ks-seller-card-title"><i style="background:' + sellerColor(i) + '"></i><b>' + escapeHtml(row.seller) + '</b></div>'
+          + '<div class="ks-seller-card-title">'
+          + '<i style="background:'
+        + color
+        + '"></i>'
+        +'<b>' 
+        + escapeHtml(row.seller) 
+        + '</b></div>'
           + '<small>' + formatCount(row.totalListingCount) + ' listing · ' + formatCount(row.activeListingCount) + ' active</small>'
           + '<span title="Listing đại diện hiện tại">Đại diện: ' + escapeHtml(row.representativeListingId || '—') + '</span>'
           + '<div class="ks-seller-price">' + formatCurrency(row.representativePrice, payload.currency) + ' ' + semanticChangeMarkup(row.changePct) + '</div>'
@@ -753,8 +908,83 @@
 
   function bindEvents() {
     if (!view.host) return;
-    var select = view.host.querySelector('#ks-keyword-select');
-    if (select) select.addEventListener('change', function () { selectKeyword(select.value); });
+
+    ensureKeywordSelectorGlobalListeners();
+
+    var keywordTrigger = view.host.querySelector('#ks-keyword-trigger');
+    var keywordDropdown = view.host.querySelector('#ks-keyword-dropdown');
+    var keywordSearch = view.host.querySelector('#ks-keyword-search');
+    var keywordOptions = view.host.querySelector('#ks-keyword-options');
+    var keywordClear = view.host.querySelector('#ks-keyword-clear');
+
+    if (keywordTrigger && keywordDropdown) {
+      keywordTrigger.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        view.keywordSelectorOpen = !view.keywordSelectorOpen;
+        keywordDropdown.hidden = !view.keywordSelectorOpen;
+        keywordTrigger.setAttribute('aria-expanded', String(view.keywordSelectorOpen));
+
+        if (view.keywordSelectorOpen && keywordSearch) {
+          requestAnimationFrame(function () {
+            keywordSearch.focus();
+            keywordSearch.select();
+          });
+        }
+      });
+    }
+
+    if (keywordSearch) {
+      keywordSearch.addEventListener('click', function (event) {
+        event.stopPropagation();
+      });
+      keywordSearch.addEventListener('input', function () {
+        view.keywordSearch = keywordSearch.value || '';
+        refreshKeywordSelectorOptions();
+      });
+    }
+
+    if (keywordOptions) {
+      keywordOptions.addEventListener('click', function (event) {
+        var option = event.target.closest('[data-ks-keyword-option]');
+        if (!option) return;
+        event.preventDefault();
+        event.stopPropagation();
+
+        var keyword = option.getAttribute('data-ks-keyword-option') || '';
+        if (!keyword) return;
+
+        view.keywordSelectorOpen = false;
+        view.keywordSearch = '';
+        selectKeyword(keyword);
+      });
+    }
+
+    if (keywordClear) {
+      keywordClear.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        view.keyword = '';
+        view.keywordSearch = '';
+        view.selectedSeller = '';
+        view.keywordSelectorOpen = true;
+
+        if (keywordSearch) keywordSearch.value = '';
+        refreshKeywordSelectorOptions();
+
+        var triggerContent = view.host.querySelector('#ks-keyword-trigger .multi-select-trigger-content');
+        if (triggerContent) triggerContent.innerHTML = '<span class="multi-select-placeholder">Chọn keyword</span>';
+
+        if (keywordDropdown) keywordDropdown.hidden = false;
+        if (keywordTrigger) keywordTrigger.setAttribute('aria-expanded', 'true');
+
+        if (keywordSearch) {
+          requestAnimationFrame(function () { keywordSearch.focus(); });
+        }
+      });
+    }
 
     view.host.querySelectorAll('[data-ks-keyword-card]').forEach(function (button) {
       button.addEventListener('click', function () { selectKeyword(button.getAttribute('data-ks-keyword-card')); });
@@ -832,9 +1062,24 @@
   }
 
   async function selectKeyword(keyword) {
-    if (!keyword || keyword === view.keyword && findKeyword(view.cache, keyword)) return;
-    view.keyword = keyword; view.selectedSeller = '';
-    if (findKeyword(view.cache, keyword)) { render(); return; }
+    if (!keyword) return;
+
+    view.keywordSelectorOpen = false;
+    view.keywordSearch = '';
+
+    if (keyword === view.keyword && findKeyword(view.cache, keyword)) {
+      closeKeywordSelectorDom({ clearSearch: true });
+      return;
+    }
+
+    view.keyword = keyword;
+    view.selectedSeller = '';
+
+    if (findKeyword(view.cache, keyword)) {
+      render();
+      return;
+    }
+
     await loadKeyword(keyword, false);
   }
 
@@ -881,13 +1126,19 @@
     view.host = host;
     view.apiClient = options && options.apiClient ? options.apiClient : null;
     view.destroyed = false;
+    view.keywordSelectorOpen = false;
+    view.keywordSearch = '';
     view.period = 'week'; // requested default
     if (options && options.reload === false && view.keywordOptions.length) { render(); return; }
     await loadAll(Boolean(options && options.reload));
   }
 
   function destroy() {
-    view.destroyed = true; view.host = null; view.selectedSeller = '';
+    view.destroyed = true;
+    view.keywordSelectorOpen = false;
+    view.keywordSearch = '';
+    view.host = null;
+    view.selectedSeller = '';
   }
 
   global.KeywordSellerAnalytics = {

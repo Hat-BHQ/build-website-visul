@@ -32,6 +32,7 @@ from app.listing_classifier import (
     build_product_context,
     classify_listing_role,
 )
+from app.listing_matcher import match_listing
 
 EVENT_TRACKING_STARTED = "TRACKING_STARTED"
 EVENT_PRICE_CHANGED = "PRICE_CHANGED"
@@ -67,6 +68,73 @@ def _round(value, digits: int = 2):
     if value is None:
         return None
     return round(float(value), digits)
+
+
+def _normalized_keyword(value) -> str:
+    """Chuẩn hóa keyword chỉ để so scope của observation.
+
+    Không dùng hàm này để match title. Việc match title dùng ``listing_matcher``.
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
+
+
+def filter_observations_for_keyword(
+    observations: list[dict],
+    *,
+    keyword: str,
+) -> list[dict]:
+    """Giữ observation thực sự thuộc keyword đang phân tích.
+
+    Quy tắc:
+    - ``row.keyword`` phải đúng keyword đang chọn nếu nguồn có metadata keyword.
+    - Với FLAT source, nơi thường có ``brand``/``model``, kiểm tra thêm title qua
+      ``listing_matcher`` để cho phép alias số ít/số nhiều như
+      ``speaker`` <-> ``speakers`` nhưng vẫn giữ model exact.
+    - Với NORMALIZED source, brand/model hiện có thể rỗng. Khi đó tin cậy mapping
+      ``listing_matches.keyword`` của source thay vì tự suy đoán model từ title.
+    - Không lọc role tại đây. Role được xử lý riêng bởi ``listing_classifier``.
+    """
+    selected_keyword = _normalized_keyword(keyword)
+    if not selected_keyword:
+        return []
+
+    matched_rows: list[dict] = []
+
+    for row in observations:
+        row_keyword = _normalized_keyword(row.get("keyword"))
+
+        # Source layer phải gắn keyword cho observation. Nếu có thì bắt buộc cùng scope.
+        if row_keyword and row_keyword != selected_keyword:
+            continue
+
+        # Không có metadata keyword thì không tự gom nhầm observation sang keyword khác.
+        if not row_keyword:
+            continue
+
+        title = row.get("listing_title") or ""
+        brand = row.get("brand") or None
+        model = row.get("model") or None
+
+        # FLAT source thường có brand/model. Dùng matcher để kiểm tra title một lần nữa.
+        # role="all" để matcher KHÔNG loại component/accessory ở tầng keyword;
+        # việc Whole product do listing_classifier quyết định phía dưới.
+        if brand or model:
+            result = match_listing(
+                title=title,
+                keyword=keyword,
+                brand=brand,
+                model=model,
+                role="all",
+                exclude_keywords=None,
+            )
+            if not result.matched:
+                continue
+
+        matched_rows.append(row)
+
+    return matched_rows
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +691,14 @@ def build_keyword_payload(
     """Payload day du cho 1 keyword: KPI, chart series, bang, alert, audit."""
     roles = eligible_roles or {ROLE_WHOLE}
 
-    listings = build_listing_timelines(observations)
+    source_observation_count = len(observations)
+    matched_observations = filter_observations_for_keyword(
+        observations,
+        keyword=keyword,
+    )
+    matched_observation_count = len(matched_observations)
+
+    listings = build_listing_timelines(matched_observations)
     classify_listings(listings)
 
     axis = build_axis(listings)
@@ -638,7 +713,11 @@ def build_keyword_payload(
             "audit": [],
             "summary": {
                 "seller_count": 0,
+                "tracked_seller_count": 0,
                 "listing_count": 0,
+                "total_listing_count": 0,
+                "source_observation_count": source_observation_count,
+                "matched_observation_count": matched_observation_count,
                 "median_price": None,
                 "min_price": None,
                 "max_price": None,
@@ -646,8 +725,13 @@ def build_keyword_payload(
                 "out_of_stock": 0,
                 "ended": 0,
                 "new_listings": 0,
+                "excluded_listings": 0,
             },
-            "empty_reason": "no_listing",
+            "empty_reason": (
+                "no_keyword_match"
+                if source_observation_count > 0 and matched_observation_count == 0
+                else "no_listing"
+            ),
         }
 
     latest = axis[-1]
@@ -698,9 +782,19 @@ def build_keyword_payload(
 
     status_counts = {"ACTIVE": 0, "OUT_OF_STOCK": 0, "ENDED": 0, "NEW_LISTING": 0}
     for listing in listings:
-        snapshot = listing_snapshot_at(listing, latest)
+        verdict = listing_eligibility_at(
+            listing,
+            latest,
+            min_price=min_price,
+            eligible_roles=roles,
+        )
+        if not verdict["eligible"]:
+            continue
+
+        snapshot = verdict.get("snapshot") or listing_snapshot_at(listing, latest)
         if not snapshot:
             continue
+
         status = snapshot.get("status")
         if status in status_counts:
             status_counts[status] += 1
@@ -717,6 +811,12 @@ def build_keyword_payload(
 
     currency = listings[0].get("currency") if listings else "USD"
 
+    current_seller_count = sum(
+        1
+        for summary in seller_summaries
+        if summary.get("representative_listing_id") is not None
+    )
+
     return {
         "keyword": keyword,
         "currency": currency or "USD",
@@ -727,9 +827,14 @@ def build_keyword_payload(
         "alerts": alerts,
         "audit": audit,
         "summary": {
-            "seller_count": len(seller_summaries),
+            # Seller hiện còn representative listing đủ điều kiện tại mốc latest.
+            "seller_count": current_seller_count,
+            # Seller từng có dữ liệu đủ điều kiện trong khoảng thời gian đang xem.
+            "tracked_seller_count": len(seller_summaries),
             "listing_count": eligible_listing_count,
             "total_listing_count": len(listings),
+            "source_observation_count": source_observation_count,
+            "matched_observation_count": matched_observation_count,
             "median_price": _round(median(representative_prices)),
             "min_price": _round(min(representative_prices)) if representative_prices else None,
             "max_price": _round(max(representative_prices)) if representative_prices else None,
