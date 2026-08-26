@@ -37,6 +37,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from statistics import median
+from zoneinfo import ZoneInfo
 
 from app.listing_matcher import (
     FILTER_MODE_BRAND_MODEL,
@@ -168,6 +169,8 @@ def _as_date(value) -> date | None:
         return None
 
     if isinstance(value, datetime):
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            return value.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).date()
         return value.date()
 
     if isinstance(value, date):

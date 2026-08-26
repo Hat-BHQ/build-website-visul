@@ -1,0 +1,82 @@
+diff --git a/services/hqa-service/app/keyword_seller_source.py b/services/hqa-service/app/keyword_seller_source.py
+--- a/services/hqa-service/app/keyword_seller_source.py
++++ b/services/hqa-service/app/keyword_seller_source.py
+@@ -35,8 +35,9 @@
+ from __future__ import annotations
+ 
+ import logging
+ from dataclasses import dataclass
+ from datetime import date, datetime
+ from statistics import median
++from zoneinfo import ZoneInfo
+ 
+ from app.listing_matcher import (
+     FILTER_MODE_BRAND_MODEL,
+@@ -54,6 +55,9 @@ from sqlalchemy.orm import Session
+ 
+ logger = logging.getLogger(__name__)
+ 
++# Keep Dashboard calendar dates consistent with All Listings, whose UI renders
++# timestamps in Asia/Ho_Chi_Minh before showing the date/time.
++HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+ SOURCE_FLAT = "flat"
+ SOURCE_NORMALIZED = "normalized"
+ SOURCE_NONE = "none"
+@@ -167,11 +171,22 @@
+ def _as_date(value) -> date | None:
++    """Convert a value to the Dashboard business date (Asia/Ho_Chi_Minh).
++
++    All Listings keeps the full timestamp and formats it in Asia/Ho_Chi_Minh.
++    Keyword/Seller analytics eventually needs a ``date`` for its timeline, so an
++    aware datetime must be converted to the same timezone *before* truncating the
++    time component. Naive datetimes are left on their stored calendar date to
++    preserve the existing behavior for timestamp-without-time-zone sources.
++    """
+     if value is None:
+         return None
+ 
+     if isinstance(value, datetime):
++        if value.tzinfo is not None and value.utcoffset() is not None:
++            return value.astimezone(HCM_TZ).date()
+         return value.date()
+ 
+     if isinstance(value, date):
+         return value
+ 
+     return None
+diff --git a/services/hqa-service/tests/test_keyword_seller_timezones.py b/services/hqa-service/tests/test_keyword_seller_timezones.py
+new file mode 100644
+--- /dev/null
++++ b/services/hqa-service/tests/test_keyword_seller_timezones.py
+@@ -0,0 +1,31 @@
++from datetime import date, datetime, timezone
++
++from app.keyword_seller_source import _as_date
++
++
++def test_aware_utc_datetime_is_converted_to_hcm_before_date_truncation():
++    # Same instant that All Listings renders as 13/08/2026 06:54 in HCM.
++    published_at = datetime(2026, 8, 12, 23, 54, tzinfo=timezone.utc)
++
++    assert _as_date(published_at) == date(2026, 8, 13)
++
++
++def test_aware_utc_datetime_without_day_rollover_keeps_same_hcm_date():
++    published_at = datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc)
++
++    assert _as_date(published_at) == date(2026, 8, 13)
++
++
++def test_naive_datetime_preserves_stored_calendar_date():
++    # Do not assume a timezone for timestamp-without-time-zone data. This keeps
++    # existing behavior and avoids applying +7 hours twice when DB already stores
++    # local wall-clock time.
++    published_at = datetime(2026, 8, 13, 6, 54)
++
++    assert _as_date(published_at) == date(2026, 8, 13)
++
++
++def test_date_value_is_unchanged():
++    value = date(2026, 8, 13)
++
++    assert _as_date(value) == value
