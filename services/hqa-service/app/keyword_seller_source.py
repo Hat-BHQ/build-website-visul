@@ -306,9 +306,11 @@ def _row_matches_scope(
     - Mode A -> ``match_brand_model_title`` (boundary phrase).
     - Mode B -> ``match_keyword_strict``    (equality + plural cho phep).
 
-    ``exclude_flag`` trong DB luon duoc ton trong.
+    Mode B van ton trong ``exclude_flag``.
+    Mode A la title-driven: exact Brand + Model la dieu kien match duy nhat,
+    nen ``exclude_flag`` khong duoc phep loai mot title da match.
     """
-    if bool(row.get("exclude_flag")):
+    if bool(row.get("exclude_flag")) and not scope.is_brand_model:
         return False
 
     title = _clean(row.get("listing_title"))
@@ -659,6 +661,10 @@ def _normalized_observation_sql(
         params=params,
     )
 
+    # Mode A chi match exact Brand + Model tren title, khong dung exclude_flag
+    # lam business gate. Mode B giu behavior cu.
+    exclude_filter = "" if scope.is_brand_model else "AND COALESCE(m.exclude_flag, false) = false"
+
     # CO Y KHONG loc theo ``m.keyword``: mapping keyword trong DB co the thieu
     # hoac lech, trong khi title van hop le. Token ILIKE o tren da du hep va
     # chac chan la superset cua ket qua matcher.
@@ -707,7 +713,8 @@ def _normalized_observation_sql(
           ON m.listing_id = l.id
         LEFT JOIN {marketplace}.listing_snapshots s
           ON s.listing_id = l.id
-        WHERE COALESCE(m.exclude_flag, false) = false
+        WHERE 1 = 1
+        {exclude_filter}
         {scope_filter}
     """
 
@@ -969,8 +976,14 @@ def _fetch_flat(
                 COALESCE(r.seller_or_shop, '')
               ) <> ''
           AND r.research_date IS NOT NULL
-          AND COALESCE(r.exclude_flag, false) = false
     """
+
+    # Mode A = exact Brand + Model tren title. Khong de exclude_flag loai som
+    # candidate truoc khi matcher chay. Mode B van giu filter exclude_flag.
+    if not scope.is_brand_model:
+        sql += """
+          AND COALESCE(r.exclude_flag, false) = false
+        """
 
     # CO Y KHONG loc theo ``r.keyword``: mode A khong co keyword, va o mode B
     # cot keyword co the thieu/lech trong khi title van hop le.

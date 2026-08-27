@@ -28,6 +28,11 @@ from datetime import date
 from statistics import median as _median
 
 from app.listing_classifier import (
+    ROLE_ACCESSORY,
+    ROLE_COMPONENT,
+    ROLE_DOC,
+    ROLE_IRRELEVANT,
+    ROLE_UNCERTAIN,
     ROLE_WHOLE,
     build_product_context,
     classify_listing_role,
@@ -48,6 +53,15 @@ SEVERITY_WARNING = "warning"
 SEVERITY_INFO = "info"
 
 ACTIVE_STATUSES = {"ACTIVE", "NEW_LISTING"}
+
+# Mode A is intentionally title-driven only: once the exact Brand/Model matcher
+# accepts a listing, listing_classifier is metadata/audit information and must
+# not remove that listing from seller/price analytics. Mode B keeps the existing
+# whole_product-only behavior.
+ALL_CLASSIFIER_ROLES = {
+    ROLE_WHOLE, ROLE_COMPONENT, ROLE_ACCESSORY,
+    ROLE_DOC, ROLE_IRRELEVANT, ROLE_UNCERTAIN,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +127,10 @@ def filter_observations_for_scope(
     matched_rows: list[dict] = []
 
     for row in observations:
-        if row.get("exclude_flag"):
+        # Mode A is intentionally title-only: exact Brand + Model wins even if
+        # an upstream ingestion rule marked exclude_flag (for example a whole
+        # receiver whose title also says "With Owner's Manual").
+        if row.get("exclude_flag") and normalized_mode != FILTER_MODE_BRAND_MODEL:
             continue
 
         title = row.get("listing_title") or ""
@@ -774,9 +791,13 @@ def build_analytics_payload(
     Scope duoc mo ta boi ``filter_mode`` + (brand/model) HOAC keyword.
     Hai mode loai tru nhau; caller phai bao dam khong truyen lan gia tri.
     """
-    roles = eligible_roles or {ROLE_WHOLE}
-
     normalized_mode = (filter_mode or "").strip().lower()
+    roles = eligible_roles or (
+        ALL_CLASSIFIER_ROLES
+        if normalized_mode == FILTER_MODE_BRAND_MODEL
+        else {ROLE_WHOLE}
+    )
+
     label = scope_label(
         filter_mode=normalized_mode,
         brand=brand,
@@ -801,6 +822,15 @@ def build_analytics_payload(
         keyword=keyword,
     )
     matched_observation_count = len(matched_observations)
+
+    # Downstream eligibility/classifier historically treats exclude_flag as a
+    # hard rejection. That is correct for Mode B, but contradicts Mode A's
+    # contract: once exact Brand + Model matched, the listing must stay in the
+    # analytics scope. Clear only the analytics copy; DB data is NOT modified.
+    if normalized_mode == FILTER_MODE_BRAND_MODEL:
+        matched_observations = [
+            {**row, "exclude_flag": False} for row in matched_observations
+        ]
 
     listings = build_listing_timelines(matched_observations)
     classify_listings(listings)
